@@ -187,7 +187,7 @@ const generateNewEmployeeNotificationEmail = (employeeName, employeeId, email, r
  */
 const generateLeaveEditEmail = (employeeName, changes) => {
   const changesList = changes.map(c => `<li>${c}</li>`).join('');
-  
+
   return `
     <html>
     <body style="font-family: Arial, sans-serif; line-height: 1.6; color: #333;">
@@ -463,6 +463,169 @@ const generateDetailedSalarySlipEmail = (data) => {
   `;
 };
 
+/**
+ * Generate password reset email HTML
+ * Add this function to your existing emailTemplates.js file
+ */
+
+const generatePasswordResetEmail = (fullName, resetUrl, expiryHours = 24) => {
+  return `
+    <!DOCTYPE html>
+    <html>
+    <head>
+      <meta charset="utf-8">
+      <meta name="viewport" content="width=device-width, initial-scale=1.0">
+      <title>Password Reset</title>
+    </head>
+    <body style="margin: 0; padding: 0; background-color: #f1f5f9; font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;">
+      <div style="max-width: 600px; margin: 0 auto; padding: 40px 20px;">
+        <!-- Header -->
+        <div style="background: linear-gradient(135deg, #1e293b 0%, #334155 100%); padding: 40px 30px; border-radius: 16px 16px 0 0; text-align: center;">
+          <h1 style="color: #ffffff; margin: 0; font-size: 28px; font-weight: 700;">HRMS</h1>
+          <p style="color: #94a3b8; margin: 10px 0 0; font-size: 14px;">Password Reset Request</p>
+        </div>
+        
+        <!-- Content -->
+        <div style="background: #ffffff; padding: 40px 30px; border: 1px solid #e2e8f0; border-top: none;">
+          <p style="color: #334155; font-size: 18px; line-height: 1.6; margin: 0 0 20px;">
+            Hi <strong>${fullName}</strong>,
+          </p>
+          
+          <p style="color: #475569; font-size: 16px; line-height: 1.6; margin: 0 0 25px;">
+            We received a request to reset your password. Click the button below to create a new password:
+          </p>
+          
+          <!-- Button -->
+          <div style="text-align: center; margin: 30px 0;">
+            <a href="${resetUrl}" 
+               style="display: inline-block; background: linear-gradient(135deg, #1e293b 0%, #334155 100%); 
+                      color: #ffffff; text-decoration: none; padding: 16px 40px; border-radius: 50px; 
+                      font-size: 16px; font-weight: 600; box-shadow: 0 4px 14px rgba(30, 41, 59, 0.3);">
+              Reset My Password
+            </a>
+          </div>
+          
+          <!-- Warning Box -->
+          <div style="background: #fef3c7; border: 1px solid #fcd34d; border-radius: 8px; padding: 16px; margin: 25px 0;">
+            <p style="color: #92400e; font-size: 14px; margin: 0; line-height: 1.5;">
+              <strong>⚠️ Important:</strong> This is a <strong>one-time use link</strong> and will expire in <strong>${expiryHours} hours</strong>. 
+              After you reset your password, this link will no longer work.
+            </p>
+          </div>
+          
+          <!-- Link fallback -->
+          <p style="color: #64748b; font-size: 14px; line-height: 1.6; margin: 20px 0 0;">
+            If the button doesn't work, copy and paste this link into your browser:
+          </p>
+          <p style="background: #f8fafc; padding: 12px; border-radius: 6px; word-break: break-all; 
+                    font-size: 12px; color: #475569; margin: 10px 0;">
+            ${resetUrl}
+          </p>
+          
+          <!-- Security notice -->
+          <div style="background: #f8fafc; border-radius: 8px; padding: 16px; margin: 25px 0 0;">
+            <p style="color: #64748b; font-size: 13px; margin: 0; line-height: 1.5;">
+              🔒 <strong>Security Notice:</strong> If you didn't request this password reset, you can safely ignore this email. 
+              Your password will remain unchanged.
+            </p>
+          </div>
+        </div>
+        
+        <!-- Footer -->
+        <div style="background: #f8fafc; padding: 25px 30px; border: 1px solid #e2e8f0; border-top: none; border-radius: 0 0 16px 16px; text-align: center;">
+          <p style="color: #94a3b8; font-size: 12px; margin: 0;">
+            This is an automated message from HRMS. Please do not reply to this email.
+          </p>
+          <p style="color: #cbd5e1; font-size: 11px; margin: 10px 0 0;">
+            © ${new Date().getFullYear()} HRMS. All rights reserved.
+          </p>
+        </div>
+      </div>
+    </body>
+    </html>
+  `;
+};
+
+/**
+ * Generate bulk password reset email HTML (for admin-triggered resets)
+ */
+const generateBulkPasswordResetEmail = (fullName, resetUrl, expiryHours = 24) => {
+  return `
+    <!DOCTYPE html>
+    <html>
+    <head>
+      <meta charset="utf-8">
+      <meta name="viewport" content="width=device-width, initial-scale=1.0">
+      <title>Password Reset Required</title>
+    </head>
+    <body style="margin: 0; padding: 0; background-color: #f1f5f9; font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;">
+      <div style="max-width: 600px; margin: 0 auto; padding: 40px 20px;">
+        <!-- Header -->
+        <div style="background: linear-gradient(135deg, #1e293b 0%, #334155 100%); padding: 40px 30px; border-radius: 16px 16px 0 0; text-align: center;">
+          <h1 style="color: #ffffff; margin: 0; font-size: 28px; font-weight: 700;">HRMS</h1>
+          <p style="color: #94a3b8; margin: 10px 0 0; font-size: 14px;">Password Reset Required</p>
+        </div>
+        
+        <!-- Content -->
+        <div style="background: #ffffff; padding: 40px 30px; border: 1px solid #e2e8f0; border-top: none;">
+          <p style="color: #334155; font-size: 18px; line-height: 1.6; margin: 0 0 20px;">
+            Hi <strong>${fullName}</strong>,
+          </p>
+          
+          <p style="color: #475569; font-size: 16px; line-height: 1.6; margin: 0 0 15px;">
+            Your administrator has initiated a password reset for your HRMS account. 
+          </p>
+          
+          <p style="color: #475569; font-size: 16px; line-height: 1.6; margin: 0 0 25px;">
+            Please click the button below to set a new password:
+          </p>
+          
+          <!-- Button -->
+          <div style="text-align: center; margin: 30px 0;">
+            <a href="${resetUrl}" 
+               style="display: inline-block; background: linear-gradient(135deg, #1e293b 0%, #334155 100%); 
+                      color: #ffffff; text-decoration: none; padding: 16px 40px; border-radius: 50px; 
+                      font-size: 16px; font-weight: 600; box-shadow: 0 4px 14px rgba(30, 41, 59, 0.3);">
+              Set New Password
+            </a>
+          </div>
+          
+          <!-- Warning Box -->
+          <div style="background: #fef3c7; border: 1px solid #fcd34d; border-radius: 8px; padding: 16px; margin: 25px 0;">
+            <p style="color: #92400e; font-size: 14px; margin: 0; line-height: 1.5;">
+              <strong>⚠️ Important:</strong> This is a <strong>one-time use link</strong> and will expire in <strong>${expiryHours} hours</strong>. 
+              Please reset your password as soon as possible.
+            </p>
+          </div>
+          
+          <!-- Link fallback -->
+          <p style="color: #64748b; font-size: 14px; line-height: 1.6; margin: 20px 0 0;">
+            If the button doesn't work, copy and paste this link into your browser:
+          </p>
+          <p style="background: #f8fafc; padding: 12px; border-radius: 6px; word-break: break-all; 
+                    font-size: 12px; color: #475569; margin: 10px 0;">
+            ${resetUrl}
+          </p>
+        </div>
+        
+        <!-- Footer -->
+        <div style="background: #f8fafc; padding: 25px 30px; border: 1px solid #e2e8f0; border-top: none; border-radius: 0 0 16px 16px; text-align: center;">
+          <p style="color: #94a3b8; font-size: 12px; margin: 0;">
+            This is an automated message from HRMS. Please do not reply to this email.
+          </p>
+          <p style="color: #cbd5e1; font-size: 11px; margin: 10px 0 0;">
+            © ${new Date().getFullYear()} HRMS. All rights reserved.
+          </p>
+        </div>
+      </div>
+    </body>
+    </html>
+  `;
+};
+
+
+
+
 module.exports = {
   generateLeaveApplicationEmail,
   generateLeaveApprovalEmail,
@@ -470,5 +633,7 @@ module.exports = {
   generateNewEmployeeNotificationEmail,
   generateLeaveEditEmail,
   generateSalarySlipEmail,
-  generateDetailedSalarySlipEmail
+  generateDetailedSalarySlipEmail,
+  generatePasswordResetEmail,
+  generateBulkPasswordResetEmail
 };

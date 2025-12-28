@@ -22,6 +22,12 @@ const payrollRoutes = require('./routes/payroll');
 const setupRoutes = require('./routes/setup');
 const notificationRoutes = require('./routes/notifications');
 const holidayRoutes = require('./routes/holidays');
+const uploadsRouter = require('./routes/uploads');
+const passwordResetRouter = require('./routes/passwordReset');
+const attendanceRouter = require('./routes/attendance');
+
+
+
 
 
 const app = express();
@@ -110,6 +116,14 @@ app.use('/api', leaveRoutes); // Leave also handles /leave-policy
 app.use('/api', employeeRoutes); // Employee also handles /employee-id-settings
 app.use('/api', notificationRoutes); // Notification handles /notification-settings
 app.use('/api/holidays', holidayRoutes);
+app.use('/api/uploads', uploadsRouter);
+app.use('/api/password-reset', passwordResetRouter);
+app.use('/api/attendance', attendanceRouter);
+
+
+
+
+
 
 
 // 404 handler

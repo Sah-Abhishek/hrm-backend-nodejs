@@ -10,13 +10,28 @@ const { generateWelcomeEmail, generateNewEmployeeNotificationEmail } = require('
 
 /**
  * GET /api/employees
- * Get all employees (admin/manager only)
+ * Get all employees (admin) or team members (manager)
  */
 router.get('/', authenticate, requireRole([UserRole.ADMIN, UserRole.MANAGER]), async (req, res) => {
   try {
     const db = getDB();
+    const user = req.user;
+
+    let query = {};
+
+    // If user is a manager, only return employees in their team
+    if (user.role === UserRole.MANAGER) {
+      query = {
+        $or: [
+          { manager_email: user.email },  // Employees reporting to this manager
+          { email: user.email }            // Include the manager themselves
+        ]
+      };
+    }
+    // If admin, query remains empty = fetch all employees
+
     const employees = await db.collection('employees')
-      .find({}, { projection: { _id: 0 } })
+      .find(query, { projection: { _id: 0 } })
       .toArray();
 
     // Normalize dates and set id to employee_id for frontend

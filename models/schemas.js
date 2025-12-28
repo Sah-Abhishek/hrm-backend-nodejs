@@ -21,6 +21,13 @@ const LeaveType = {
   UNPAID_LEAVE: 'Unpaid Leave'
 };
 
+const AttendanceStatus = {
+  PRESENT: 'present',
+  ABSENT: 'absent',
+  HALF_DAY: 'half-day',
+  LEAVE: 'leave'
+};
+
 // Validation Schemas
 const schemas = {
   // Auth
@@ -210,6 +217,8 @@ const schemas = {
     employee_id: Joi.string().required(),
     month: Joi.string().pattern(/^\d{4}-\d{2}$/).required()
   }),
+
+  // Holiday
   holidayCreate: Joi.object({
     name: Joi.string().required(),
     date: Joi.date().required(),
@@ -238,6 +247,41 @@ const schemas = {
     scope: Joi.string().valid('year', 'month').required(),
     year: Joi.number().required(),
     month: Joi.number().min(1).max(12).allow(null)
+  }),
+
+  // Attendance
+  attendanceMark: Joi.object({
+    employee_id: Joi.string().required(),
+    date: Joi.string().pattern(/^\d{4}-\d{2}-\d{2}$/).required(), // YYYY-MM-DD
+    status: Joi.string().valid(...Object.values(AttendanceStatus), '').required()
+  }),
+
+  attendanceBulkMark: Joi.object({
+    records: Joi.array().items(Joi.object({
+      employee_id: Joi.string().required(),
+      date: Joi.string().pattern(/^\d{4}-\d{2}-\d{2}$/).required(),
+      status: Joi.string().valid(...Object.values(AttendanceStatus), '').required()
+    })).min(1).required()
+  }),
+
+  attendanceMarkColumn: Joi.object({
+    date: Joi.string().pattern(/^\d{4}-\d{2}-\d{2}$/).required(),
+    status: Joi.string().valid(...Object.values(AttendanceStatus)).required()
+  }),
+
+  attendanceQuery: Joi.object({
+    month: Joi.number().min(1).max(12),
+    year: Joi.number().min(2000).max(2100)
+  }),
+
+  attendanceDownload: Joi.object({
+    month: Joi.number().min(1).max(12),
+    year: Joi.number().min(2000).max(2100)
+  }),
+
+  attendanceClear: Joi.object({
+    month: Joi.number().min(1).max(12).required(),
+    year: Joi.number().min(2000).max(2100).required()
   })
 };
 
@@ -283,6 +327,7 @@ module.exports = {
   UserRole,
   LeaveStatus,
   LeaveType,
+  AttendanceStatus,
   defaultLeaveBalance,
   defaultSalaryTemplate,
   defaultLeavePolicy
