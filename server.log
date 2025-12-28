@@ -1,0 +1,18 @@
+[36m[HRMS SETUP] setup_completed = true[0m
+[DATABASE] MONGO_URL: Set
+[DATABASE] DB_NAME: hrms
+✅ MongoDB connected successfully
+[32m[DATABASE] Connected to MongoDB[0m
+[32m[SERVER] HRMS Backend running on http://0.0.0.0:9002[0m
+[2025-12-21T01:49:37.294Z] GET /health
+[2025-12-21T01:49:37.384Z] POST /api/auth/register
+✉️ Email sent to test_1766281777356@example.com
+✉️ Email sent to aditya@brainwavetechnologie.com
+[2025-12-21T01:49:38.783Z] GET /api/auth/me
+[2025-12-21T01:49:38.892Z] GET /api/employees
+[2025-12-21T01:49:38.937Z] GET /api/leaves
+[2025-12-21T01:49:38.946Z] GET /api/dashboard/stats
+[2025-12-21T01:49:39.069Z] GET /api/notifications
+
+[SERVER] Shutting down...
+MongoDB connection closed

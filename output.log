@@ -1,0 +1,7 @@
+Targeting Backend URL: http://103.142.175.170:9001
+Starting API Tests...
+[PASS] Health Check (200) - 466ms
+[FAIL] Register User (500) - 719ms
+[FAIL] Login User (401) - 46ms
+Skipping authenticated tests due to login failure
+Report generated: api_test_report.md

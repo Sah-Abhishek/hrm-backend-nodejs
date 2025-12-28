@@ -1,0 +1,10 @@
+Targeting Backend URL: http://localhost:9002
+Starting API Tests...
+[PASS] Health Check (200) - 159ms
+[PASS] Register User (201) - 1423ms
+[PASS] Get Profile (200) - 107ms
+[FAIL] List Employees (403) - 45ms
+[FAIL] List Leaves (404) - 8ms
+[PASS] Dashboard Stats (200) - 122ms
+[FAIL] Notifications (404) - 5ms
+Report generated: api_test_report.md
