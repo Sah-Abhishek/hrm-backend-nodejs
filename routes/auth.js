@@ -4,9 +4,36 @@ const { getDB } = require('../config/database');
 const { authenticate, getCurrentEmployee, createAccessToken } = require('../middleware/auth');
 const { validate } = require('../middleware/roleCheck');
 const { schemas, defaultLeaveBalance } = require('../models/schemas');
-const { hashPassword, verifyPassword, generateUUID, generateEmployeeId } = require('../utils/helpers');
+const { hashPassword, verifyPassword, generateUUID, generateEmployeeId, normalizeLeaveType } = require('../utils/helpers');
 const { sendEmailNotification } = require('../services/emailService');
 const { generateWelcomeEmail, generateNewEmployeeNotificationEmail } = require('../utils/emailTemplates');
+
+/**
+ * Helper: Get leave balance from configured policy
+ * Falls back to default if no policy is configured
+ */
+async function getLeaveBalanceFromPolicy(db) {
+  try {
+    const policy = await db.collection('leave_policies').findOne({}, { projection: { _id: 0 } });
+
+    if (!policy || !policy.policies || policy.policies.length === 0) {
+      // Return default if no policy configured
+      return { ...defaultLeaveBalance };
+    }
+
+    const balance = {};
+    for (const policyItem of policy.policies) {
+      const leaveKey = normalizeLeaveType(policyItem.leave_type);
+      balance[leaveKey] = policyItem.annual_quota;
+    }
+
+    return balance;
+  } catch (error) {
+    console.error('Error fetching leave policy:', error);
+    // Fallback to default on error
+    return { ...defaultLeaveBalance };
+  }
+}
 
 /**
  * POST /api/auth/register
@@ -54,6 +81,11 @@ router.post('/register', validate(schemas.userRegister), async (req, res) => {
       }
     }
 
+    // ============================================
+    // GET LEAVE BALANCE FROM CONFIGURED POLICY
+    // ============================================
+    const leaveBalance = await getLeaveBalanceFromPolicy(db);
+
     // Create employee profile
     const employeeDoc = {
       id: userId,
@@ -69,7 +101,7 @@ router.post('/register', validate(schemas.userRegister), async (req, res) => {
       joining_date: now,
       manager_email: userData.manager_email || null,
       manager_name: managerName,
-      leave_balance: { ...defaultLeaveBalance },
+      leave_balance: leaveBalance,  // Uses policy-based balance
       created_at: now
     };
 
@@ -151,8 +183,12 @@ router.post('/login', validate(schemas.userLogin), async (req, res) => {
       { projection: { _id: 0 } }
     );
 
+    // User not found - return specific error code
     if (!userDoc) {
-      return res.status(401).json({ detail: 'Invalid credentials' });
+      return res.status(401).json({
+        detail: 'No account found with this email',
+        error_code: 'USER_NOT_FOUND'
+      });
     }
 
     // Verify password
@@ -162,8 +198,13 @@ router.post('/login', validate(schemas.userLogin), async (req, res) => {
     }
 
     const isValid = await verifyPassword(password, hashedPassword);
+
+    // Invalid password - return specific error code
     if (!isValid) {
-      return res.status(401).json({ detail: 'Invalid credentials' });
+      return res.status(401).json({
+        detail: 'Incorrect password',
+        error_code: 'INVALID_PASSWORD'
+      });
     }
 
     // Create token
