@@ -25,6 +25,9 @@ const holidayRoutes = require('./routes/holidays');
 const uploadsRouter = require('./routes/uploads');
 const passwordResetRouter = require('./routes/passwordReset');
 const attendanceRouter = require('./routes/attendance');
+const reimbursementRoutes = require('./routes/Reimbursements');
+const compOffRoutes = require('./routes/compoffRoutes');
+
 
 
 
@@ -119,6 +122,8 @@ app.use('/api/holidays', holidayRoutes);
 app.use('/api/uploads', uploadsRouter);
 app.use('/api/password-reset', passwordResetRouter);
 app.use('/api/attendance', attendanceRouter);
+app.use('/api/reimbursements', reimbursementRoutes);
+app.use('/api/comp-off', compOffRoutes);
 
 
 

@@ -78,6 +78,185 @@ function datesToISOStrings(dates) {
 }
 
 /**
+ * Helper: Get leave balance from policy
+ */
+async function getLeaveBalanceFromPolicy(db) {
+  const policy = await db.collection('leave_policies').findOne({}, { projection: { _id: 0 } });
+
+  if (!policy || !policy.policies || policy.policies.length === 0) {
+    // Return default if no policy configured
+    return {
+      sick_leave: 12,
+      casual_leave: 12,
+      paid_leave: 15,
+      unpaid_leave: 0
+    };
+  }
+
+  const balance = {};
+  for (const policyItem of policy.policies) {
+    const leaveKey = normalizeLeaveType(policyItem.leave_type);
+    balance[leaveKey] = policyItem.annual_quota;
+  }
+
+  return balance;
+}
+
+// ============================================
+// LEAVE POLICY ROUTES (MUST BE BEFORE /:leaveId)
+// ============================================
+
+/**
+ * GET /api/leaves/leave-policy
+ * Get current leave policy
+ */
+router.get('/leave-policy', authenticate, async (req, res) => {
+  try {
+    const db = getDB();
+    const policy = await db.collection('leave_policies').findOne({}, { projection: { _id: 0 } });
+
+    if (!policy) {
+      return res.json({
+        ...defaultLeavePolicy,
+        updated_at: new Date().toISOString()
+      });
+    }
+
+    res.json(policy);
+  } catch (error) {
+    console.error('Get leave policy error:', error);
+    res.status(500).json({ detail: 'Internal server error' });
+  }
+});
+
+/**
+ * POST /api/leaves/leave-policy
+ * Save leave policy (admin only)
+ */
+router.post('/leave-policy', authenticate, requireRole([UserRole.ADMIN]), async (req, res) => {
+  try {
+    const db = getDB();
+    const policyData = req.body;
+
+    const policy = {
+      id: 'default_policy',
+      policies: policyData.policies || [],
+      updated_at: toISOString(new Date()),
+      updated_by: req.user.email
+    };
+
+    // Save to DB (upsert)
+    await db.collection('leave_policies').updateOne(
+      { id: 'default_policy' },
+      { $set: policy },
+      { upsert: true }
+    );
+
+    delete policy._id;
+
+    res.json({
+      status: 'success',
+      message: 'Leave policy updated successfully',
+      policy
+    });
+  } catch (error) {
+    console.error('Save leave policy error:', error);
+    res.status(500).json({ detail: error.message });
+  }
+});
+
+/**
+ * POST /api/leaves/leave-policy/apply-to-employee/:employeeId
+ * Apply policy to specific employee (admin only)
+ */
+router.post('/leave-policy/apply-to-employee/:employeeId', authenticate, requireRole([UserRole.ADMIN]), async (req, res) => {
+  try {
+    const db = getDB();
+    const { employeeId } = req.params;
+
+    // Get policy
+    const policy = await db.collection('leave_policies').findOne({}, { projection: { _id: 0 } });
+    if (!policy) {
+      return res.status(404).json({ detail: 'Leave policy not configured' });
+    }
+
+    // Find employee
+    const employee = await db.collection('employees').findOne(
+      { employee_id: employeeId },
+      { projection: { full_name: 1 } }
+    );
+    if (!employee) {
+      return res.status(404).json({ detail: 'Employee not found' });
+    }
+
+    // Build new leave balance
+    const newBalance = {};
+    for (const policyItem of policy.policies || []) {
+      const leaveKey = normalizeLeaveType(policyItem.leave_type);
+      newBalance[leaveKey] = policyItem.annual_quota;
+    }
+
+    // Update employee
+    await db.collection('employees').updateOne(
+      { employee_id: employeeId },
+      { $set: { leave_balance: newBalance } }
+    );
+
+    res.json({
+      status: 'success',
+      message: `Leave policy applied to ${employee.full_name}`,
+      new_balance: newBalance
+    });
+  } catch (error) {
+    console.error('Apply policy to employee error:', error);
+    res.status(500).json({ detail: error.message });
+  }
+});
+
+/**
+ * POST /api/leaves/leave-policy/apply-to-all
+ * Apply policy to all employees (admin only)
+ */
+router.post('/leave-policy/apply-to-all', authenticate, requireRole([UserRole.ADMIN]), async (req, res) => {
+  try {
+    const db = getDB();
+
+    // Get policy
+    const policy = await db.collection('leave_policies').findOne({}, { projection: { _id: 0 } });
+    if (!policy) {
+      return res.status(404).json({ detail: 'Leave policy not configured' });
+    }
+
+    // Build new leave balance
+    const newBalance = {};
+    for (const policyItem of policy.policies || []) {
+      const leaveKey = normalizeLeaveType(policyItem.leave_type);
+      newBalance[leaveKey] = policyItem.annual_quota;
+    }
+
+    // Update all employees
+    const result = await db.collection('employees').updateMany(
+      {},
+      { $set: { leave_balance: newBalance } }
+    );
+
+    res.json({
+      status: 'success',
+      message: `Leave policy applied to ${result.modifiedCount} employees`,
+      new_balance: newBalance,
+      employees_updated: result.modifiedCount
+    });
+  } catch (error) {
+    console.error('Apply policy to all error:', error);
+    res.status(500).json({ detail: error.message });
+  }
+});
+
+// ============================================
+// LEAVE APPLICATION ROUTES
+// ============================================
+
+/**
  * POST /api/leaves
  * Apply for leave
  */
@@ -274,6 +453,248 @@ router.get('/all', authenticate, requireRole([UserRole.ADMIN]), async (req, res)
     res.status(500).json({ detail: 'Internal server error' });
   }
 });
+
+/**
+ * GET /api/leaves/calendar/me
+ * Get current user's leaves for calendar
+ * NOTE: This must be BEFORE /calendar/:employeeId to avoid matching "me" as employeeId
+ */
+router.get('/calendar/me', authenticate, async (req, res) => {
+  try {
+    const db = getDB();
+    const user = req.user;
+
+    // Find employee by user email
+    const employee = await db.collection('employees').findOne(
+      { email: user.email },
+      { projection: { _id: 0 } }
+    );
+
+    if (!employee) {
+      return res.status(404).json({ detail: 'Employee not found' });
+    }
+
+    // Reuse the calendar logic
+    req.params.employeeId = employee.employee_id;
+
+    // Get leaves
+    const leaves = await db.collection('leaves')
+      .find({ employee_email: employee.email }, { projection: { _id: 0 } })
+      .sort({ created_at: -1 })
+      .toArray();
+
+    // Define colors for leave types
+    const leaveColors = {
+      sick_leave: { bg: '#fee2e2', border: '#ef4444', text: '#991b1b' },
+      casual_leave: { bg: '#dbeafe', border: '#3b82f6', text: '#1e40af' },
+      paid_leave: { bg: '#dcfce7', border: '#22c55e', text: '#166534' },
+      unpaid_leave: { bg: '#fef3c7', border: '#f59e0b', text: '#92400e' },
+      comp_off: { bg: '#e9d5ff', border: '#a855f7', text: '#6b21a8' }
+    };
+
+    const statusStyles = {
+      pending: { opacity: '0.6', pattern: 'striped' },
+      manager_approved: { opacity: '0.8', pattern: 'dotted' },
+      approved: { opacity: '1', pattern: 'solid' },
+      rejected: { opacity: '0.4', pattern: 'crossed' }
+    };
+
+    const { year, month } = req.query;
+
+    // Process leaves for calendar
+    const calendarEvents = [];
+
+    for (const leave of leaves) {
+      normalizeLeaveDates(leave);
+
+      const leaveTypeKey = normalizeLeaveType(leave.leave_type);
+      const colors = leaveColors[leaveTypeKey] || { bg: '#f1f5f9', border: '#64748b', text: '#334155' };
+      const statusStyle = statusStyles[leave.status] || { opacity: '1', pattern: 'solid' };
+
+      for (const date of leave.dates || []) {
+        const dateObj = new Date(date);
+        const dateStr = dateObj.toISOString().substring(0, 10);
+
+        if (year && month) {
+          const yearInt = parseInt(year, 10);
+          const monthInt = parseInt(month, 10);
+          const eventYear = dateObj.getFullYear();
+          const eventMonth = dateObj.getMonth() + 1;
+
+          if (eventYear !== yearInt || eventMonth !== monthInt) {
+            continue;
+          }
+        } else if (year) {
+          const yearInt = parseInt(year, 10);
+          if (dateObj.getFullYear() !== yearInt) {
+            continue;
+          }
+        }
+
+        calendarEvents.push({
+          id: `${leave.id}_${dateStr}`,
+          leave_id: leave.id,
+          title: leave.leave_type,
+          date: dateStr,
+          datetime: dateObj.toISOString(),
+          leave_type: leave.leave_type,
+          leave_type_key: leaveTypeKey,
+          status: leave.status,
+          reason: leave.reason,
+          is_half_day: leave.is_half_day || false,
+          half_day_period: leave.half_day_period,
+          total_days_in_application: leave.days_count,
+          colors,
+          status_style: statusStyle
+        });
+      }
+    }
+
+    calendarEvents.sort((a, b) => new Date(a.date) - new Date(b.date));
+
+    res.json({
+      employee: {
+        id: employee.employee_id,
+        name: employee.full_name,
+        email: employee.email,
+        department: employee.department
+      },
+      leave_balance: employee.leave_balance || {},
+      events: calendarEvents,
+      color_legend: leaveColors,
+      status_legend: statusStyles
+    });
+  } catch (error) {
+    console.error('Get my calendar leaves error:', error);
+    res.status(500).json({ detail: 'Internal server error' });
+  }
+});
+
+/**
+ * GET /api/leaves/calendar/:employeeId
+ * Get employee leaves for calendar
+ */
+router.get('/calendar/:employeeId', authenticate, async (req, res) => {
+  try {
+    const db = getDB();
+    const { employeeId } = req.params;
+    const { year, month } = req.query;
+    const user = req.user;
+
+    // Find employee
+    const employee = await db.collection('employees').findOne(
+      { employee_id: employeeId },
+      { projection: { _id: 0 } }
+    );
+
+    if (!employee) {
+      return res.status(404).json({ detail: 'Employee not found' });
+    }
+
+    // Permission check
+    if (![UserRole.ADMIN, UserRole.MANAGER].includes(user.role)) {
+      if (employee.email !== user.email) {
+        return res.status(403).json({ detail: "Not authorized to view this employee's leaves" });
+      }
+    }
+
+    // Get leaves
+    const leaves = await db.collection('leaves')
+      .find({ employee_email: employee.email }, { projection: { _id: 0 } })
+      .sort({ created_at: -1 })
+      .toArray();
+
+    // Define colors for leave types
+    const leaveColors = {
+      sick_leave: { bg: '#fee2e2', border: '#ef4444', text: '#991b1b' },
+      casual_leave: { bg: '#dbeafe', border: '#3b82f6', text: '#1e40af' },
+      paid_leave: { bg: '#dcfce7', border: '#22c55e', text: '#166534' },
+      unpaid_leave: { bg: '#fef3c7', border: '#f59e0b', text: '#92400e' },
+      comp_off: { bg: '#e9d5ff', border: '#a855f7', text: '#6b21a8' }
+    };
+
+    const statusStyles = {
+      pending: { opacity: '0.6', pattern: 'striped' },
+      manager_approved: { opacity: '0.8', pattern: 'dotted' },
+      approved: { opacity: '1', pattern: 'solid' },
+      rejected: { opacity: '0.4', pattern: 'crossed' }
+    };
+
+    // Process leaves for calendar - create an event for each date
+    const calendarEvents = [];
+
+    for (const leave of leaves) {
+      normalizeLeaveDates(leave);
+
+      const leaveTypeKey = normalizeLeaveType(leave.leave_type);
+      const colors = leaveColors[leaveTypeKey] || { bg: '#f1f5f9', border: '#64748b', text: '#334155' };
+      const statusStyle = statusStyles[leave.status] || { opacity: '1', pattern: 'solid' };
+
+      // Create an event for each date in the dates array
+      for (const date of leave.dates || []) {
+        const dateObj = new Date(date);
+        const dateStr = dateObj.toISOString().substring(0, 10);
+
+        // Filter by year/month if provided
+        if (year && month) {
+          const yearInt = parseInt(year, 10);
+          const monthInt = parseInt(month, 10);
+          const eventYear = dateObj.getFullYear();
+          const eventMonth = dateObj.getMonth() + 1;
+
+          if (eventYear !== yearInt || eventMonth !== monthInt) {
+            continue;
+          }
+        } else if (year) {
+          const yearInt = parseInt(year, 10);
+          if (dateObj.getFullYear() !== yearInt) {
+            continue;
+          }
+        }
+
+        calendarEvents.push({
+          id: `${leave.id}_${dateStr}`,
+          leave_id: leave.id,
+          title: leave.leave_type,
+          date: dateStr,
+          datetime: dateObj.toISOString(),
+          leave_type: leave.leave_type,
+          leave_type_key: leaveTypeKey,
+          status: leave.status,
+          reason: leave.reason,
+          is_half_day: leave.is_half_day || false,
+          half_day_period: leave.half_day_period,
+          total_days_in_application: leave.days_count,
+          colors,
+          status_style: statusStyle
+        });
+      }
+    }
+
+    // Sort events by date
+    calendarEvents.sort((a, b) => new Date(a.date) - new Date(b.date));
+
+    res.json({
+      employee: {
+        id: employee.employee_id,
+        name: employee.full_name,
+        email: employee.email,
+        department: employee.department
+      },
+      leave_balance: employee.leave_balance || {},
+      events: calendarEvents,
+      color_legend: leaveColors,
+      status_legend: statusStyles
+    });
+  } catch (error) {
+    console.error('Get calendar leaves error:', error);
+    res.status(500).json({ detail: 'Internal server error' });
+  }
+});
+
+// ============================================
+// PARAMETERIZED ROUTES (MUST BE LAST)
+// ============================================
 
 /**
  * PUT /api/leaves/:leaveId/action
@@ -689,286 +1110,25 @@ router.delete('/:leaveId', authenticate, requireRole([UserRole.ADMIN]), async (r
   }
 });
 
-/**
- * GET /api/leaves/calendar/:employeeId
- * Get employee leaves for calendar
- */
-router.get('/calendar/:employeeId', authenticate, async (req, res) => {
-  try {
-    const db = getDB();
-    const { employeeId } = req.params;
-    const { year, month } = req.query;
-    const user = req.user;
-
-    // Find employee
-    const employee = await db.collection('employees').findOne(
-      { employee_id: employeeId },
-      { projection: { _id: 0 } }
-    );
-
-    if (!employee) {
-      return res.status(404).json({ detail: 'Employee not found' });
-    }
-
-    // Permission check
-    if (![UserRole.ADMIN, UserRole.MANAGER].includes(user.role)) {
-      if (employee.email !== user.email) {
-        return res.status(403).json({ detail: "Not authorized to view this employee's leaves" });
-      }
-    }
-
-    // Get leaves
-    const leaves = await db.collection('leaves')
-      .find({ employee_email: employee.email }, { projection: { _id: 0 } })
-      .sort({ created_at: -1 })
-      .toArray();
-
-    // Define colors for leave types
-    const leaveColors = {
-      sick_leave: { bg: '#fee2e2', border: '#ef4444', text: '#991b1b' },
-      casual_leave: { bg: '#dbeafe', border: '#3b82f6', text: '#1e40af' },
-      paid_leave: { bg: '#dcfce7', border: '#22c55e', text: '#166534' },
-      unpaid_leave: { bg: '#fef3c7', border: '#f59e0b', text: '#92400e' },
-      comp_off: { bg: '#e9d5ff', border: '#a855f7', text: '#6b21a8' }
-    };
-
-    const statusStyles = {
-      pending: { opacity: '0.6', pattern: 'striped' },
-      manager_approved: { opacity: '0.8', pattern: 'dotted' },
-      approved: { opacity: '1', pattern: 'solid' },
-      rejected: { opacity: '0.4', pattern: 'crossed' }
-    };
-
-    // Process leaves for calendar - create an event for each date
-    const calendarEvents = [];
-
-    for (const leave of leaves) {
-      normalizeLeaveDates(leave);
-
-      const leaveTypeKey = normalizeLeaveType(leave.leave_type);
-      const colors = leaveColors[leaveTypeKey] || { bg: '#f1f5f9', border: '#64748b', text: '#334155' };
-      const statusStyle = statusStyles[leave.status] || { opacity: '1', pattern: 'solid' };
-
-      // Create an event for each date in the dates array
-      for (const date of leave.dates || []) {
-        const dateObj = new Date(date);
-        const dateStr = dateObj.toISOString().substring(0, 10);
-
-        // Filter by year/month if provided
-        if (year && month) {
-          const yearInt = parseInt(year, 10);
-          const monthInt = parseInt(month, 10);
-          const eventYear = dateObj.getFullYear();
-          const eventMonth = dateObj.getMonth() + 1;
-
-          if (eventYear !== yearInt || eventMonth !== monthInt) {
-            continue;
-          }
-        } else if (year) {
-          const yearInt = parseInt(year, 10);
-          if (dateObj.getFullYear() !== yearInt) {
-            continue;
-          }
-        }
-
-        calendarEvents.push({
-          id: `${leave.id}_${dateStr}`,
-          leave_id: leave.id,
-          title: leave.leave_type,
-          date: dateStr,
-          datetime: dateObj.toISOString(),
-          leave_type: leave.leave_type,
-          leave_type_key: leaveTypeKey,
-          status: leave.status,
-          reason: leave.reason,
-          is_half_day: leave.is_half_day || false,
-          half_day_period: leave.half_day_period,
-          total_days_in_application: leave.days_count,
-          colors,
-          status_style: statusStyle
-        });
-      }
-    }
-
-    // Sort events by date
-    calendarEvents.sort((a, b) => new Date(a.date) - new Date(b.date));
-
-    res.json({
-      employee: {
-        id: employee.employee_id,
-        name: employee.full_name,
-        email: employee.email,
-        department: employee.department
-      },
-      leave_balance: employee.leave_balance || {},
-      events: calendarEvents,
-      color_legend: leaveColors,
-      status_legend: statusStyles
-    });
-  } catch (error) {
-    console.error('Get calendar leaves error:', error);
-    res.status(500).json({ detail: 'Internal server error' });
-  }
-});
-
-/**
- * GET /api/leaves/calendar/me
- * Get current user's leaves for calendar
- */
-router.get('/calendar/me', authenticate, async (req, res) => {
-  try {
-    // Redirect to the employee-specific endpoint
-    req.params.employeeId = req.user.employee_id;
-    return router.handle(req, res);
-  } catch (error) {
-    console.error('Get my calendar leaves error:', error);
-    res.status(500).json({ detail: 'Internal server error' });
-  }
-});
-
-// Leave Policy Routes
-
-/**
- * GET /api/leave-policy
- * Get current leave policy
- */
-router.get('/leave-policy', authenticate, async (req, res) => {
-  try {
-    const db = getDB();
-    const policy = await db.collection('leave_policies').findOne({}, { projection: { _id: 0 } });
-
-    if (!policy) {
-      return res.json({
-        ...defaultLeavePolicy,
-        updated_at: new Date().toISOString()
-      });
-    }
-
-    res.json(policy);
-  } catch (error) {
-    console.error('Get leave policy error:', error);
-    res.status(500).json({ detail: 'Internal server error' });
-  }
-});
-
-/**
- * POST /api/leave-policy
- * Save leave policy (admin only)
- */
-router.post('/leave-policy', authenticate, requireRole([UserRole.ADMIN]), async (req, res) => {
-  try {
-    const db = getDB();
-    const policyData = req.body;
-
-    const policy = {
-      id: 'default_policy',
-      policies: policyData.policies || [],
-      updated_at: toISOString(new Date()),
-      updated_by: req.user.email
-    };
-
-    // Save to DB
-    await db.collection('leave_policies').deleteMany({});
-    await db.collection('leave_policies').insertOne(policy);
-
-    delete policy._id;
-
-    res.json({
-      status: 'success',
-      message: 'Leave policy updated successfully',
-      policy
-    });
-  } catch (error) {
-    console.error('Save leave policy error:', error);
-    res.status(500).json({ detail: error.message });
-  }
-});
-
-/**
- * POST /api/leave-policy/apply-to-employee/:employeeId
- * Apply policy to specific employee (admin only)
- */
-router.post('/leave-policy/apply-to-employee/:employeeId', authenticate, requireRole([UserRole.ADMIN]), async (req, res) => {
-  try {
-    const db = getDB();
-    const { employeeId } = req.params;
-
-    // Get policy
-    const policy = await db.collection('leave_policies').findOne({}, { projection: { _id: 0 } });
-    if (!policy) {
-      return res.status(404).json({ detail: 'Leave policy not configured' });
-    }
-
-    // Find employee
-    const employee = await db.collection('employees').findOne(
-      { employee_id: employeeId },
-      { projection: { full_name: 1 } }
-    );
-    if (!employee) {
-      return res.status(404).json({ detail: 'Employee not found' });
-    }
-
-    // Build new leave balance
-    const newBalance = {};
-    for (const policyItem of policy.policies || []) {
-      const leaveKey = normalizeLeaveType(policyItem.leave_type);
-      newBalance[leaveKey] = policyItem.annual_quota;
-    }
-
-    // Update employee
-    await db.collection('employees').updateOne(
-      { employee_id: employeeId },
-      { $set: { leave_balance: newBalance } }
-    );
-
-    res.json({
-      status: 'success',
-      message: `Leave policy applied to ${employee.full_name}`,
-      new_balance: newBalance
-    });
-  } catch (error) {
-    console.error('Apply policy to employee error:', error);
-    res.status(500).json({ detail: error.message });
-  }
-});
-
-/**
- * POST /api/leave-policy/apply-to-all
- * Apply policy to all employees (admin only)
- */
-router.post('/leave-policy/apply-to-all', authenticate, requireRole([UserRole.ADMIN]), async (req, res) => {
-  try {
-    const db = getDB();
-
-    // Get policy
-    const policy = await db.collection('leave_policies').findOne({}, { projection: { _id: 0 } });
-    if (!policy) {
-      return res.status(404).json({ detail: 'Leave policy not configured' });
-    }
-
-    // Build new leave balance
-    const newBalance = {};
-    for (const policyItem of policy.policies || []) {
-      const leaveKey = normalizeLeaveType(policyItem.leave_type);
-      newBalance[leaveKey] = policyItem.annual_quota;
-    }
-
-    // Update all employees
-    const result = await db.collection('employees').updateMany(
-      {},
-      { $set: { leave_balance: newBalance } }
-    );
-
-    res.json({
-      status: 'success',
-      message: `Leave policy applied to ${result.modifiedCount} employees`,
-      new_balance: newBalance,
-      employees_updated: result.modifiedCount
-    });
-  } catch (error) {
-    console.error('Apply policy to all error:', error);
-    res.status(500).json({ detail: error.message });
-  }
-});
-
+// Export helper for use in employee routes
 module.exports = router;
+module.exports.getLeaveBalanceFromPolicy = async (db) => {
+  const policy = await db.collection('leave_policies').findOne({}, { projection: { _id: 0 } });
+
+  if (!policy || !policy.policies || policy.policies.length === 0) {
+    return {
+      sick_leave: 12,
+      casual_leave: 12,
+      paid_leave: 15,
+      unpaid_leave: 0
+    };
+  }
+
+  const balance = {};
+  for (const policyItem of policy.policies) {
+    const leaveKey = normalizeLeaveType(policyItem.leave_type);
+    balance[leaveKey] = policyItem.annual_quota;
+  }
+
+  return balance;
+};

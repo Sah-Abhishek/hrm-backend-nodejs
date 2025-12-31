@@ -392,11 +392,20 @@ router.post('/payroll/send-salary-slip', authenticate, requireRole([UserRole.ADM
 /**
  * POST /api/payroll/send-detailed-salary-slip
  * Send detailed salary slip with components (admin only)
+ * Now supports manual unpaid leave deduction rates
  */
 router.post('/payroll/send-detailed-salary-slip', authenticate, requireRole([UserRole.ADMIN]), async (req, res) => {
   try {
     const db = getDB();
-    const { employee_id, month } = req.body;
+    const {
+      employee_id,
+      month,
+      unpaid_full_days = 0,
+      unpaid_half_days = 0,
+      per_full_day_deduction = 0,
+      per_half_day_deduction = 0,
+      unpaid_leave_deduction = 0
+    } = req.body;
 
     // Get employee and salary structure
     const employee = await db.collection('employees').findOne(
@@ -422,45 +431,28 @@ router.post('/payroll/send-detailed-salary-slip', authenticate, requireRole([Use
     const monthName = getMonthName(yearInt, monthInt);
     const totalDaysInMonth = getDaysInMonth(yearInt, monthInt);
 
-    // Get leaves
-    const startOfMonth = new Date(yearInt, monthInt - 1, 1);
-    const endOfMonth = new Date(yearInt, monthInt, 0, 23, 59, 59);
-
-    const leaves = await db.collection('leaves')
-      .find({
-        employee_id: employee.id,
-        start_date: { $gte: startOfMonth.toISOString(), $lte: endOfMonth.toISOString() }
-      }, { projection: { _id: 0 } })
-      .toArray();
-
-    const approvedLeaves = leaves.filter(l => l.status === LeaveStatus.APPROVED);
-    const unpaidLeaves = approvedLeaves.filter(l => l.leave_type === 'Unpaid Leave');
-    const unpaidDays = unpaidLeaves.reduce((sum, l) => sum + l.days_count, 0);
-    const payableDays = totalDaysInMonth - unpaidDays;
+    // Calculate total unpaid days for payable days calculation
+    const totalUnpaidDays = unpaid_full_days + (unpaid_half_days * 0.5);
+    const payableDays = totalDaysInMonth - totalUnpaidDays;
 
     // Calculate salary with components
     const basicSalary = salaryStructure.basic_salary;
-    const perDayBasic = basicSalary / totalDaysInMonth;
-    const basicDeduction = unpaidDays * perDayBasic;
-    const payableBasic = basicSalary - basicDeduction;
 
     // Build earnings HTML
-    let earningsHtml = `<tr><td style="padding: 10px; border-bottom: 1px solid #e2e8f0;">Basic Salary</td><td style="padding: 10px; border-bottom: 1px solid #e2e8f0; text-align: right;">₹${payableBasic.toLocaleString('en-IN', { minimumFractionDigits: 2 })}</td></tr>`;
-    let totalEarnings = payableBasic;
+    let earningsHtml = `<tr><td style="padding: 12px 16px; border-bottom: 1px solid #e2e8f0; font-size: 14px;">Basic Salary</td><td style="padding: 12px 16px; border-bottom: 1px solid #e2e8f0; text-align: right; font-size: 14px; font-weight: 600;">₹${basicSalary.toLocaleString('en-IN', { minimumFractionDigits: 2 })}</td></tr>`;
+    let totalEarnings = basicSalary;
 
     for (const comp of salaryStructure.components || []) {
       if (comp.type === 'earning') {
         let compAmount;
         if (comp.is_percentage && comp.calculation_base === 'basic') {
-          compAmount = (payableBasic * comp.amount) / 100;
+          compAmount = (basicSalary * comp.amount) / 100;
         } else {
           compAmount = comp.calculated_amount || comp.amount;
-          const perDay = compAmount / totalDaysInMonth;
-          compAmount = compAmount - (perDay * unpaidDays);
         }
 
         totalEarnings += compAmount;
-        earningsHtml += `<tr><td style="padding: 10px; border-bottom: 1px solid #e2e8f0;">${comp.name}</td><td style="padding: 10px; border-bottom: 1px solid #e2e8f0; text-align: right;">₹${compAmount.toLocaleString('en-IN', { minimumFractionDigits: 2 })}</td></tr>`;
+        earningsHtml += `<tr><td style="padding: 12px 16px; border-bottom: 1px solid #e2e8f0; font-size: 14px;">${comp.name}</td><td style="padding: 12px 16px; border-bottom: 1px solid #e2e8f0; text-align: right; font-size: 14px; font-weight: 600;">₹${compAmount.toLocaleString('en-IN', { minimumFractionDigits: 2 })}</td></tr>`;
       }
     }
 
@@ -472,7 +464,7 @@ router.post('/payroll/send-detailed-salary-slip', authenticate, requireRole([Use
       if (comp.type === 'deduction') {
         let compAmount;
         if (comp.is_percentage && comp.calculation_base === 'basic') {
-          compAmount = (payableBasic * comp.amount) / 100;
+          compAmount = (basicSalary * comp.amount) / 100;
         } else if (comp.is_percentage && comp.calculation_base === 'gross') {
           compAmount = (totalEarnings * comp.amount) / 100;
         } else {
@@ -480,29 +472,179 @@ router.post('/payroll/send-detailed-salary-slip', authenticate, requireRole([Use
         }
 
         totalDeductions += compAmount;
-        deductionsHtml += `<tr><td style="padding: 10px; border-bottom: 1px solid #e2e8f0;">${comp.name}</td><td style="padding: 10px; border-bottom: 1px solid #e2e8f0; text-align: right;">₹${compAmount.toLocaleString('en-IN', { minimumFractionDigits: 2 })}</td></tr>`;
+        deductionsHtml += `<tr><td style="padding: 12px 16px; border-bottom: 1px solid #e2e8f0; font-size: 14px;">${comp.name}</td><td style="padding: 12px 16px; border-bottom: 1px solid #e2e8f0; text-align: right; font-size: 14px; font-weight: 600; color: #dc2626;">₹${compAmount.toLocaleString('en-IN', { minimumFractionDigits: 2 })}</td></tr>`;
       }
+    }
+
+    // Add unpaid leave deduction if applicable
+    let leaveDeductionHtml = '';
+    if (unpaid_leave_deduction > 0) {
+      // Build detailed leave deduction breakdown
+      let leaveBreakdown = '';
+      if (unpaid_full_days > 0) {
+        leaveBreakdown += `${unpaid_full_days} full day${unpaid_full_days !== 1 ? 's' : ''} @ ₹${per_full_day_deduction.toLocaleString('en-IN')}`;
+      }
+      if (unpaid_half_days > 0) {
+        if (leaveBreakdown) leaveBreakdown += ', ';
+        leaveBreakdown += `${unpaid_half_days} half day${unpaid_half_days !== 1 ? 's' : ''} @ ₹${per_half_day_deduction.toLocaleString('en-IN')}`;
+      }
+
+      leaveDeductionHtml = `
+        <tr style="background-color: #fef3c7;">
+          <td style="padding: 12px 16px; border-bottom: 1px solid #fcd34d; font-size: 14px;">
+            <div style="font-weight: 600; color: #92400e;">Unpaid Leave Deduction</div>
+            <div style="font-size: 12px; color: #a16207; margin-top: 4px;">${leaveBreakdown}</div>
+          </td>
+          <td style="padding: 12px 16px; border-bottom: 1px solid #fcd34d; text-align: right; font-size: 14px; font-weight: 600; color: #dc2626;">
+            ₹${unpaid_leave_deduction.toLocaleString('en-IN', { minimumFractionDigits: 2 })}
+          </td>
+        </tr>
+      `;
+      totalDeductions += unpaid_leave_deduction;
     }
 
     const grossSalary = totalEarnings;
     const netSalary = grossSalary - totalDeductions;
 
-    // Generate email
-    const emailHtml = generateDetailedSalarySlipEmail({
-      employeeName: employee.full_name,
-      employeeId: employee.id,
-      department: employee.department,
-      designation: employee.designation,
-      monthName,
-      totalDaysInMonth,
-      payableDays,
-      unpaidDays,
-      earningsHtml,
-      deductionsHtml,
-      grossSalary,
-      totalDeductions,
-      netSalary
-    });
+    // Generate email with leave deductions included
+    const emailHtml = `
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+</head>
+<body style="margin: 0; padding: 0; font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; background-color: #f1f5f9;">
+  <div style="max-width: 650px; margin: 0 auto; background-color: #ffffff; border-radius: 12px; overflow: hidden; box-shadow: 0 4px 6px rgba(0, 0, 0, 0.1);">
+    
+    <!-- Header -->
+    <div style="background: linear-gradient(135deg, #1e293b 0%, #334155 100%); padding: 32px; text-align: center;">
+      <h1 style="color: #1e293b; margin: 0; font-size: 28px; font-weight: 700;">Salary Slip</h1>
+      <p style="color: #94a3b8; margin: 8px 0 0 0; font-size: 16px;">${monthName}</p>
+    </div>
+
+    <!-- Employee Info -->
+    <div style="padding: 24px; background-color: #f8fafc; border-bottom: 1px solid #e2e8f0;">
+      <table style="width: 100%; border-collapse: collapse;">
+        <tr>
+          <td style="padding: 8px 0;">
+            <span style="color: #64748b; font-size: 13px;">Employee Name</span><br>
+            <span style="color: #1e293b; font-size: 15px; font-weight: 600;">${employee.full_name}</span>
+          </td>
+          <td style="padding: 8px 0; text-align: right;">
+            <span style="color: #64748b; font-size: 13px;">Employee ID</span><br>
+            <span style="color: #1e293b; font-size: 15px; font-weight: 600;">${employee.employee_id || employee.id}</span>
+          </td>
+        </tr>
+        <tr>
+          <td style="padding: 8px 0;">
+            <span style="color: #64748b; font-size: 13px;">Department</span><br>
+            <span style="color: #1e293b; font-size: 15px; font-weight: 600;">${employee.department || 'N/A'}</span>
+          </td>
+          <td style="padding: 8px 0; text-align: right;">
+            <span style="color: #64748b; font-size: 13px;">Designation</span><br>
+            <span style="color: #1e293b; font-size: 15px; font-weight: 600;">${employee.designation || 'N/A'}</span>
+          </td>
+        </tr>
+      </table>
+    </div>
+
+    <!-- Attendance Summary -->
+    <div style="padding: 20px 24px; background-color: #ffffff; border-bottom: 1px solid #e2e8f0;">
+      <h3 style="color: #334155; font-size: 16px; margin: 0 0 16px 0; font-weight: 600;">Attendance Summary</h3>
+      <table style="width: 100%; border-collapse: collapse;">
+        <tr>
+          <td style="padding: 8px 16px; background-color: #f1f5f9; border-radius: 8px; text-align: center; width: 25%;">
+            <div style="color: #64748b; font-size: 12px;">Total Days</div>
+            <div style="color: #1e293b; font-size: 20px; font-weight: 700;">${totalDaysInMonth}</div>
+          </td>
+          <td style="width: 8px;"></td>
+          <td style="padding: 8px 16px; background-color: #fef3c7; border-radius: 8px; text-align: center; width: 25%;">
+            <div style="color: #92400e; font-size: 12px;">Full Day Leave</div>
+            <div style="color: #92400e; font-size: 20px; font-weight: 700;">${unpaid_full_days}</div>
+          </td>
+          <td style="width: 8px;"></td>
+          <td style="padding: 8px 16px; background-color: #fed7aa; border-radius: 8px; text-align: center; width: 25%;">
+            <div style="color: #9a3412; font-size: 12px;">Half Day Leave</div>
+            <div style="color: #9a3412; font-size: 20px; font-weight: 700;">${unpaid_half_days}</div>
+          </td>
+          <td style="width: 8px;"></td>
+          <td style="padding: 8px 16px; background-color: #dcfce7; border-radius: 8px; text-align: center; width: 25%;">
+            <div style="color: #166534; font-size: 12px;">Payable Days</div>
+            <div style="color: #166534; font-size: 20px; font-weight: 700;">${payableDays}</div>
+          </td>
+        </tr>
+      </table>
+    </div>
+
+    <!-- Main Content -->
+    <div style="padding: 24px;">
+      <div style="display: flex; gap: 24px;">
+        
+        <!-- Earnings -->
+        <div style="flex: 1; margin-bottom: 24px;">
+          <div style="background-color: #f0fdf4; border-radius: 12px; overflow: hidden; border: 1px solid #bbf7d0;">
+            <div style="background-color: #22c55e; padding: 14px 16px;">
+              <h3 style="color: #ffffff; margin: 0; font-size: 16px; font-weight: 600;">💰 Earnings</h3>
+            </div>
+            <table style="width: 100%; border-collapse: collapse;">
+              ${earningsHtml}
+              <tr style="background-color: #dcfce7;">
+                <td style="padding: 14px 16px; font-weight: 700; color: #166534; font-size: 15px;">Total Earnings</td>
+                <td style="padding: 14px 16px; text-align: right; font-weight: 700; color: #166534; font-size: 15px;">₹${totalEarnings.toLocaleString('en-IN', { minimumFractionDigits: 2 })}</td>
+              </tr>
+            </table>
+          </div>
+        </div>
+
+      </div>
+
+      <!-- Deductions -->
+      <div style="margin-bottom: 24px;">
+        <div style="background-color: #fef2f2; border-radius: 12px; overflow: hidden; border: 1px solid #fecaca;">
+          <div style="background-color: #ef4444; padding: 14px 16px;">
+            <h3 style="color: #ffffff; margin: 0; font-size: 16px; font-weight: 600;">📉 Deductions</h3>
+          </div>
+          <table style="width: 100%; border-collapse: collapse;">
+            ${deductionsHtml}
+            ${leaveDeductionHtml}
+            <tr style="background-color: #fee2e2;">
+              <td style="padding: 14px 16px; font-weight: 700; color: #991b1b; font-size: 15px;">Total Deductions</td>
+              <td style="padding: 14px 16px; text-align: right; font-weight: 700; color: #991b1b; font-size: 15px;">₹${totalDeductions.toLocaleString('en-IN', { minimumFractionDigits: 2 })}</td>
+            </tr>
+          </table>
+        </div>
+      </div>
+
+      <!-- Net Salary -->
+      <div style="background: linear-gradient(135deg, #3b82f6 0%, #6366f1 100%); border-radius: 12px; padding: 24px; text-align: center;">
+        <p style="color: rgba(255,255,255,0.8); margin: 0 0 8px 0; font-size: 14px; text-transform: uppercase; letter-spacing: 1px;">Net Salary Payable</p>
+        <p style="color: #ffffff; margin: 0; font-size: 36px; font-weight: 700;">₹${netSalary.toLocaleString('en-IN', { minimumFractionDigits: 2 })}</p>
+      </div>
+
+      ${unpaid_leave_deduction > 0 ? `
+      <!-- Leave Deduction Note -->
+      <div style="margin-top: 16px; padding: 16px; background-color: #fef3c7; border-radius: 8px; border-left: 4px solid #f59e0b;">
+        <p style="margin: 0; color: #92400e; font-size: 13px;">
+          <strong>Note:</strong> Unpaid leave deduction of ₹${unpaid_leave_deduction.toLocaleString('en-IN')} has been applied for ${unpaid_full_days > 0 ? `${unpaid_full_days} full day${unpaid_full_days !== 1 ? 's' : ''}` : ''}${unpaid_full_days > 0 && unpaid_half_days > 0 ? ' and ' : ''}${unpaid_half_days > 0 ? `${unpaid_half_days} half day${unpaid_half_days !== 1 ? 's' : ''}` : ''} of unpaid leave.
+        </p>
+      </div>
+      ` : ''}
+
+    </div>
+
+    <!-- Footer -->
+    <div style="padding: 20px 24px; background-color: #f8fafc; border-top: 1px solid #e2e8f0; text-align: center;">
+      <p style="color: #64748b; font-size: 12px; margin: 0;">
+        This is a computer-generated salary slip and does not require a signature.<br>
+        For any queries, please contact HR department.
+      </p>
+    </div>
+
+  </div>
+</body>
+</html>
+    `;
 
     // Send email
     const sent = await sendEmailNotification(
@@ -521,6 +663,11 @@ router.post('/payroll/send-detailed-salary-slip', authenticate, requireRole([Use
       details: {
         gross_salary: grossSalary,
         total_deductions: totalDeductions,
+        unpaid_leave_deduction: unpaid_leave_deduction,
+        unpaid_full_days: unpaid_full_days,
+        unpaid_half_days: unpaid_half_days,
+        per_full_day_deduction: per_full_day_deduction,
+        per_half_day_deduction: per_half_day_deduction,
         net_salary: netSalary,
         payable_days: payableDays
       }

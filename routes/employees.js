@@ -9,6 +9,33 @@ const { sendEmailNotification } = require('../services/emailService');
 const { generateWelcomeEmail, generateNewEmployeeNotificationEmail } = require('../utils/emailTemplates');
 
 /**
+ * Helper: Get leave balance from configured policy
+ * Falls back to default if no policy is configured
+ */
+async function getLeaveBalanceFromPolicy(db) {
+  try {
+    const policy = await db.collection('leave_policies').findOne({}, { projection: { _id: 0 } });
+
+    if (!policy || !policy.policies || policy.policies.length === 0) {
+      // Return default if no policy configured
+      return { ...defaultLeaveBalance };
+    }
+
+    const balance = {};
+    for (const policyItem of policy.policies) {
+      const leaveKey = normalizeLeaveType(policyItem.leave_type);
+      balance[leaveKey] = policyItem.annual_quota;
+    }
+
+    return balance;
+  } catch (error) {
+    console.error('Error fetching leave policy:', error);
+    // Fallback to default on error
+    return { ...defaultLeaveBalance };
+  }
+}
+
+/**
  * GET /api/employees
  * Get all employees (admin) or team members (manager)
  */
@@ -106,6 +133,20 @@ router.post('/', authenticate, requireRole([UserRole.ADMIN]), validate(schemas.e
       managerName = manager.full_name;
     }
 
+    // ============================================
+    // GET LEAVE BALANCE FROM CONFIGURED POLICY
+    // ============================================
+    // If employeeData has custom leave_balance, use it
+    // Otherwise, fetch from the configured leave policy
+    let leaveBalance;
+    if (employeeData.leave_balance && Object.keys(employeeData.leave_balance).length > 0) {
+      // Use provided leave balance (for custom cases)
+      leaveBalance = employeeData.leave_balance;
+    } else {
+      // Get from configured policy (NEW BEHAVIOR)
+      leaveBalance = await getLeaveBalanceFromPolicy(db);
+    }
+
     // Create user document
     const userDoc = {
       id: employeeUuid,
@@ -138,7 +179,7 @@ router.post('/', authenticate, requireRole([UserRole.ADMIN]), validate(schemas.e
       joining_date: employeeData.joining_date || now,
       manager_email: employeeData.manager_email || null,
       manager_name: managerName,
-      leave_balance: employeeData.leave_balance || { ...defaultLeaveBalance },
+      leave_balance: leaveBalance,  // Uses policy-based balance
       created_at: now
     };
 
@@ -525,4 +566,6 @@ router.post('/employee-id-settings', authenticate, requireRole([UserRole.ADMIN])
   }
 });
 
+// Export helper for potential use elsewhere
 module.exports = router;
+module.exports.getLeaveBalanceFromPolicy = getLeaveBalanceFromPolicy;

@@ -28,6 +28,26 @@ const AttendanceStatus = {
   LEAVE: 'leave'
 };
 
+const ReimbursementStatus = {
+  PENDING: 'pending',
+  APPROVED: 'approved',
+  REJECTED: 'rejected',
+  CLEARED: 'cleared'
+};
+
+const ReimbursementCategory = {
+  TRAVEL: 'Travel',
+  FOOD_MEALS: 'Food & Meals',
+  ACCOMMODATION: 'Accommodation',
+  OFFICE_SUPPLIES: 'Office Supplies',
+  EQUIPMENT: 'Equipment',
+  SOFTWARE_TOOLS: 'Software & Tools',
+  TRAINING_COURSES: 'Training & Courses',
+  MEDICAL: 'Medical',
+  COMMUNICATION: 'Communication',
+  OTHER: 'Other'
+};
+
 // Validation Schemas
 const schemas = {
   // Auth
@@ -218,6 +238,16 @@ const schemas = {
     month: Joi.string().pattern(/^\d{4}-\d{2}$/).required()
   }),
 
+  sendDetailedSalarySlip: Joi.object({
+    employee_id: Joi.string().required(),
+    month: Joi.string().pattern(/^\d{4}-\d{2}$/).required(),
+    unpaid_full_days: Joi.number().min(0).default(0),
+    unpaid_half_days: Joi.number().min(0).default(0),
+    per_full_day_deduction: Joi.number().min(0).default(0),
+    per_half_day_deduction: Joi.number().min(0).default(0),
+    unpaid_leave_deduction: Joi.number().min(0).default(0)
+  }),
+
   // Holiday
   holidayCreate: Joi.object({
     name: Joi.string().required(),
@@ -282,6 +312,20 @@ const schemas = {
   attendanceClear: Joi.object({
     month: Joi.number().min(1).max(12).required(),
     year: Joi.number().min(2000).max(2100).required()
+  }),
+
+  // Reimbursement
+  reimbursementApply: Joi.object({
+    title: Joi.string().required().max(200),
+    category: Joi.string().valid(...Object.values(ReimbursementCategory)).required(),
+    amount: Joi.number().positive().required(),
+    description: Joi.string().max(1000).allow(null, ''),
+    expense_date: Joi.date().required()
+  }),
+
+  reimbursementAction: Joi.object({
+    action: Joi.string().valid('approve', 'reject', 'clear').required(),
+    remarks: Joi.string().max(500).allow(null, '')
   })
 };
 
@@ -328,6 +372,8 @@ module.exports = {
   LeaveStatus,
   LeaveType,
   AttendanceStatus,
+  ReimbursementStatus,
+  ReimbursementCategory,
   defaultLeaveBalance,
   defaultSalaryTemplate,
   defaultLeavePolicy
