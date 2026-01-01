@@ -44,6 +44,8 @@ async function uploadFile(fileBuffer, originalName, mimeType, folder, employeeId
   // Construct the public URL
   const url = `${process.env.S3_ENDPOINT_URL}/${BUCKET_NAME}/${key}`;
 
+  console.log('[S3] File uploaded:', { key, url });
+
   return { key, url };
 }
 
@@ -52,7 +54,16 @@ async function uploadFile(fileBuffer, originalName, mimeType, folder, employeeId
  * @param {string} key - S3 object key
  */
 async function deleteFile(key) {
-  if (!key) return;
+  if (!key) {
+    console.warn('[S3] deleteFile called with empty key');
+    return;
+  }
+
+  console.log('[S3] Attempting to delete file:', {
+    key,
+    bucket: BUCKET_NAME,
+    endpoint: process.env.S3_ENDPOINT_URL
+  });
 
   try {
     const command = new DeleteObjectCommand({
@@ -60,9 +71,16 @@ async function deleteFile(key) {
       Key: key,
     });
 
-    await s3Client.send(command);
+    const result = await s3Client.send(command);
+    console.log('[S3] File deleted successfully:', { key, result });
   } catch (error) {
-    console.error('Error deleting file from S3:', error);
+    console.error('[S3] Error deleting file:', {
+      key,
+      bucket: BUCKET_NAME,
+      errorName: error.name,
+      errorMessage: error.message,
+      errorCode: error.Code || error.$metadata?.httpStatusCode,
+    });
     throw error;
   }
 }
@@ -84,21 +102,68 @@ async function getPresignedUrl(key, expiresIn = 3600) {
 
 /**
  * Extract key from S3 URL
+ * Handles multiple URL formats:
+ * - https://endpoint/bucket/key
+ * - https://bucket.endpoint/key
+ * - https://endpoint/key (bucket in subdomain)
  * @param {string} url - Full S3 URL
  * @returns {string|null}
  */
 function extractKeyFromUrl(url) {
-  if (!url) return null;
+  if (!url) {
+    console.warn('[S3] extractKeyFromUrl called with empty URL');
+    return null;
+  }
+
+  // Get current bucket name (in case it wasn't loaded initially)
+  const bucketName = process.env.S3_BUCKET_NAME || BUCKET_NAME;
+
+  if (!bucketName) {
+    console.error('[S3] BUCKET_NAME is not defined');
+    return null;
+  }
 
   try {
     const urlObj = new URL(url);
-    // Remove leading slash and bucket name from path
-    const pathParts = urlObj.pathname.split('/').filter(Boolean);
-    if (pathParts[0] === BUCKET_NAME) {
-      return pathParts.slice(1).join('/');
+    const pathname = urlObj.pathname;
+
+    console.log('[S3] Extracting key from URL:', {
+      url,
+      pathname,
+      bucketName,
+      host: urlObj.host
+    });
+
+    // Remove leading slash
+    const pathWithoutLeadingSlash = pathname.startsWith('/') ? pathname.slice(1) : pathname;
+
+    // Split into parts
+    const pathParts = pathWithoutLeadingSlash.split('/').filter(Boolean);
+
+    if (pathParts.length === 0) {
+      console.warn('[S3] No path parts found in URL');
+      return null;
     }
-    return pathParts.join('/');
-  } catch {
+
+    let key;
+
+    // Check if bucket name is in the path (path-style URL)
+    if (pathParts[0] === bucketName) {
+      // URL format: https://endpoint/bucket/key
+      key = pathParts.slice(1).join('/');
+    } else if (urlObj.host.startsWith(bucketName + '.')) {
+      // URL format: https://bucket.endpoint/key (virtual-hosted style)
+      key = pathParts.join('/');
+    } else {
+      // Assume the path is the key directly
+      key = pathParts.join('/');
+    }
+
+    console.log('[S3] Extracted key:', { key });
+
+    return key || null;
+  } catch (error) {
+    console.error('[S3] Error extracting key from URL:', { url, error: error.message });
     return null;
   }
 }
@@ -138,6 +203,30 @@ function getMaxFileSize(type) {
   return 10 * 1024 * 1024; // 10MB for government ID
 }
 
+/**
+ * Check if S3 is properly configured
+ * @returns {boolean}
+ */
+function isS3Configured() {
+  const configured = !!(
+    process.env.S3_ENDPOINT_URL &&
+    process.env.S3_BUCKET_NAME &&
+    process.env.S3_ACCESS_KEY &&
+    process.env.S3_SECRET_KEY
+  );
+
+  if (!configured) {
+    console.warn('[S3] S3 is not fully configured:', {
+      hasEndpoint: !!process.env.S3_ENDPOINT_URL,
+      hasBucket: !!process.env.S3_BUCKET_NAME,
+      hasAccessKey: !!process.env.S3_ACCESS_KEY,
+      hasSecretKey: !!process.env.S3_SECRET_KEY,
+    });
+  }
+
+  return configured;
+}
+
 module.exports = {
   uploadFile,
   deleteFile,
@@ -146,6 +235,7 @@ module.exports = {
   isValidProfilePicture,
   isValidGovernmentId,
   getMaxFileSize,
+  isS3Configured,
   BUCKET_NAME,
   BASE_FOLDER,
 };

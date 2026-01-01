@@ -12,6 +12,7 @@ const {
   isValidProfilePicture,
   isValidGovernmentId,
   getMaxFileSize,
+  isS3Configured,
 } = require('../services/s3Service');
 
 // Configure multer for memory storage
@@ -22,6 +23,18 @@ const upload = multer({
   limits: {
     fileSize: 10 * 1024 * 1024, // 10MB max (we'll check specific limits per type)
   },
+});
+
+/**
+ * GET /api/uploads/health
+ * Check if S3 is configured properly
+ */
+router.get('/health', authenticate, (req, res) => {
+  const configured = isS3Configured();
+  res.json({
+    s3_configured: configured,
+    message: configured ? 'S3 is properly configured' : 'S3 is not fully configured'
+  });
 });
 
 /**
@@ -55,13 +68,15 @@ router.post('/profile-picture', authenticate, getCurrentEmployee, upload.single(
     }
 
     // Delete old profile picture if exists
-    if (employee.profile_picture_url) {
-      const oldKey = extractKeyFromUrl(employee.profile_picture_url);
+    if (employee.profile_picture_key || employee.profile_picture_url) {
+      const oldKey = employee.profile_picture_key || extractKeyFromUrl(employee.profile_picture_url);
       if (oldKey) {
         try {
+          console.log('[Upload] Deleting old profile picture:', oldKey);
           await deleteFile(oldKey);
         } catch (err) {
-          console.error('Failed to delete old profile picture:', err);
+          console.error('[Upload] Failed to delete old profile picture:', err.message);
+          // Continue with upload even if delete fails
         }
       }
     }
@@ -93,8 +108,11 @@ router.post('/profile-picture', authenticate, getCurrentEmployee, upload.single(
       profile_picture_url: url
     });
   } catch (error) {
-    console.error('Upload profile picture error:', error);
-    res.status(500).json({ detail: 'Failed to upload profile picture' });
+    console.error('[Upload] Upload profile picture error:', error);
+    res.status(500).json({
+      detail: 'Failed to upload profile picture',
+      error: process.env.NODE_ENV === 'development' ? error.message : undefined
+    });
   }
 });
 
@@ -107,14 +125,81 @@ router.delete('/profile-picture', authenticate, getCurrentEmployee, async (req, 
     const db = getDB();
     const employee = req.employee;
 
-    if (!employee.profile_picture_url) {
+    console.log('[Upload] Delete profile picture request for:', employee.email);
+    console.log('[Upload] Current profile picture data:', {
+      url: employee.profile_picture_url,
+      key: employee.profile_picture_key
+    });
+
+    if (!employee.profile_picture_url && !employee.profile_picture_key) {
       return res.status(400).json({ detail: 'No profile picture to delete' });
     }
 
-    // Delete from S3
+    // Get the key - prefer stored key, fallback to extracting from URL
     const key = employee.profile_picture_key || extractKeyFromUrl(employee.profile_picture_url);
-    if (key) {
+
+    console.log('[Upload] Resolved key for deletion:', key);
+
+    if (!key) {
+      console.error('[Upload] Could not determine S3 key from:', {
+        storedKey: employee.profile_picture_key,
+        url: employee.profile_picture_url
+      });
+
+      // Still update the database to remove the reference even if we can't delete from S3
+      await db.collection('employees').updateOne(
+        { email: employee.email },
+        {
+          $set: {
+            profile_picture_url: null,
+            profile_picture_key: null,
+            updated_at: new Date()
+          }
+        }
+      );
+
+      return res.json({
+        status: 'success',
+        message: 'Profile picture reference removed (S3 key could not be determined)',
+        warning: 'File may still exist in S3'
+      });
+    }
+
+    // Delete from S3
+    try {
       await deleteFile(key);
+      console.log('[Upload] Successfully deleted from S3:', key);
+    } catch (s3Error) {
+      console.error('[Upload] S3 delete error:', {
+        key,
+        error: s3Error.message,
+        code: s3Error.Code || s3Error.$metadata?.httpStatusCode
+      });
+
+      // Check if it's a "not found" error - that's okay, file might already be deleted
+      const isNotFound = s3Error.Code === 'NoSuchKey' ||
+        s3Error.$metadata?.httpStatusCode === 404 ||
+        s3Error.name === 'NoSuchKey';
+
+      if (!isNotFound) {
+        // For other errors, still update DB but warn the user
+        await db.collection('employees').updateOne(
+          { email: employee.email },
+          {
+            $set: {
+              profile_picture_url: null,
+              profile_picture_key: null,
+              updated_at: new Date()
+            }
+          }
+        );
+
+        return res.json({
+          status: 'partial',
+          message: 'Profile picture reference removed, but S3 deletion failed',
+          error: s3Error.message
+        });
+      }
     }
 
     // Update employee document
@@ -134,8 +219,11 @@ router.delete('/profile-picture', authenticate, getCurrentEmployee, async (req, 
       message: 'Profile picture deleted successfully'
     });
   } catch (error) {
-    console.error('Delete profile picture error:', error);
-    res.status(500).json({ detail: 'Failed to delete profile picture' });
+    console.error('[Upload] Delete profile picture error:', error);
+    res.status(500).json({
+      detail: 'Failed to delete profile picture',
+      error: process.env.NODE_ENV === 'development' ? error.message : undefined
+    });
   }
 });
 
@@ -173,13 +261,13 @@ router.post('/government-id', authenticate, getCurrentEmployee, upload.single('f
     const idType = req.body.id_type || 'Government ID';
 
     // Delete old government ID if exists
-    if (employee.government_id_url) {
-      const oldKey = extractKeyFromUrl(employee.government_id_url);
+    if (employee.government_id_key || employee.government_id_url) {
+      const oldKey = employee.government_id_key || extractKeyFromUrl(employee.government_id_url);
       if (oldKey) {
         try {
           await deleteFile(oldKey);
         } catch (err) {
-          console.error('Failed to delete old government ID:', err);
+          console.error('[Upload] Failed to delete old government ID:', err.message);
         }
       }
     }
@@ -214,8 +302,11 @@ router.post('/government-id', authenticate, getCurrentEmployee, upload.single('f
       government_id_type: idType
     });
   } catch (error) {
-    console.error('Upload government ID error:', error);
-    res.status(500).json({ detail: 'Failed to upload government ID' });
+    console.error('[Upload] Upload government ID error:', error);
+    res.status(500).json({
+      detail: 'Failed to upload government ID',
+      error: process.env.NODE_ENV === 'development' ? error.message : undefined
+    });
   }
 });
 
@@ -228,14 +319,20 @@ router.delete('/government-id', authenticate, getCurrentEmployee, async (req, re
     const db = getDB();
     const employee = req.employee;
 
-    if (!employee.government_id_url) {
+    if (!employee.government_id_url && !employee.government_id_key) {
       return res.status(400).json({ detail: 'No government ID to delete' });
     }
 
     // Delete from S3
     const key = employee.government_id_key || extractKeyFromUrl(employee.government_id_url);
+
     if (key) {
-      await deleteFile(key);
+      try {
+        await deleteFile(key);
+      } catch (s3Error) {
+        console.error('[Upload] S3 delete error for government ID:', s3Error.message);
+        // Continue to update DB
+      }
     }
 
     // Update employee document
@@ -257,8 +354,11 @@ router.delete('/government-id', authenticate, getCurrentEmployee, async (req, re
       message: 'Government ID deleted successfully'
     });
   } catch (error) {
-    console.error('Delete government ID error:', error);
-    res.status(500).json({ detail: 'Failed to delete government ID' });
+    console.error('[Upload] Delete government ID error:', error);
+    res.status(500).json({
+      detail: 'Failed to delete government ID',
+      error: process.env.NODE_ENV === 'development' ? error.message : undefined
+    });
   }
 });
 
@@ -307,13 +407,13 @@ router.post('/employee/:employeeId/profile-picture',
       }
 
       // Delete old profile picture if exists
-      if (employee.profile_picture_url) {
-        const oldKey = extractKeyFromUrl(employee.profile_picture_url);
+      if (employee.profile_picture_key || employee.profile_picture_url) {
+        const oldKey = employee.profile_picture_key || extractKeyFromUrl(employee.profile_picture_url);
         if (oldKey) {
           try {
             await deleteFile(oldKey);
           } catch (err) {
-            console.error('Failed to delete old profile picture:', err);
+            console.error('[Upload] Failed to delete old profile picture:', err.message);
           }
         }
       }
@@ -345,7 +445,7 @@ router.post('/employee/:employeeId/profile-picture',
         profile_picture_url: url
       });
     } catch (error) {
-      console.error('Upload employee profile picture error:', error);
+      console.error('[Upload] Upload employee profile picture error:', error);
       res.status(500).json({ detail: 'Failed to upload profile picture' });
     }
   }
@@ -398,13 +498,13 @@ router.post('/employee/:employeeId/government-id',
       const idType = req.body.id_type || 'Government ID';
 
       // Delete old government ID if exists
-      if (employee.government_id_url) {
-        const oldKey = extractKeyFromUrl(employee.government_id_url);
+      if (employee.government_id_key || employee.government_id_url) {
+        const oldKey = employee.government_id_key || extractKeyFromUrl(employee.government_id_url);
         if (oldKey) {
           try {
             await deleteFile(oldKey);
           } catch (err) {
-            console.error('Failed to delete old government ID:', err);
+            console.error('[Upload] Failed to delete old government ID:', err.message);
           }
         }
       }
@@ -439,7 +539,7 @@ router.post('/employee/:employeeId/government-id',
         government_id_type: idType
       });
     } catch (error) {
-      console.error('Upload employee government ID error:', error);
+      console.error('[Upload] Upload employee government ID error:', error);
       res.status(500).json({ detail: 'Failed to upload government ID' });
     }
   }

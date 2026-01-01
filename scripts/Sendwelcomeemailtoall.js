@@ -113,7 +113,7 @@ function generateWelcomeEmailWithPasswordSetup(employee, resetUrl, expiryHours) 
         <!-- Header -->
         <div style="background: linear-gradient(135deg, #1e293b 0%, #334155 100%); padding: 50px 30px; border-radius: 16px 16px 0 0; text-align: center;">
           <div style="font-size: 48px; margin-bottom: 15px;">🎉</div>
-          <h1 style="color: #ffffff; margin: 0; font-size: 28px; font-weight: 700;">Welcome to ${organization_name || 'Our Organization'}!</h1>
+          <h1 style="color: #94a3b8; margin: 0; font-size: 28px; font-weight: 700;">Welcome to ${organization_name || 'Our Organization'}!</h1>
           <p style="color: #94a3b8; margin: 15px 0 0; font-size: 16px;">We're excited to have you on board</p>
         </div>
         
@@ -161,7 +161,7 @@ function generateWelcomeEmailWithPasswordSetup(employee, resetUrl, expiryHours) 
           <div style="text-align: center; margin: 30px 0;">
             <a href="${resetUrl}" 
                style="display: inline-block; background: linear-gradient(135deg, #1e293b 0%, #334155 100%); 
-                      color: #ffffff; text-decoration: none; padding: 18px 50px; border-radius: 50px; 
+                      color: #475569; text-decoration: none; padding: 18px 50px; border-radius: 50px; 
                       font-size: 16px; font-weight: 600; box-shadow: 0 4px 14px rgba(30, 41, 59, 0.3);
                       transition: transform 0.2s;">
               🔐 Set Up My Password

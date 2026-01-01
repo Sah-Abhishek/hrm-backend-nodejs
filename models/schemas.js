@@ -18,7 +18,8 @@ const LeaveType = {
   SICK_LEAVE: 'Sick Leave',
   CASUAL_LEAVE: 'Casual Leave',
   PAID_LEAVE: 'Paid Leave',
-  UNPAID_LEAVE: 'Unpaid Leave'
+  UNPAID_LEAVE: 'Unpaid Leave',
+  COMP_OFF: 'Comp Off'
 };
 
 const AttendanceStatus = {

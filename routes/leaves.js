@@ -721,6 +721,9 @@ router.put('/:leaveId/action', authenticate, getCurrentEmployee, validate(schema
     // Normalize dates
     normalizeLeaveDates(leaveDoc);
 
+    // *** CAPTURE ORIGINAL STATUS BEFORE ANY MODIFICATIONS ***
+    const originalStatus = leaveDoc.status;
+
     let newStatus = leaveDoc.status;
 
     if (user.role === UserRole.MANAGER) {
@@ -756,13 +759,40 @@ router.put('/:leaveId/action', authenticate, getCurrentEmployee, validate(schema
     leaveDoc.status = newStatus;
     leaveDoc.updated_at = toISOString(new Date());
 
-    // Update leave balance if approved
-    if (newStatus === LeaveStatus.APPROVED && leaveDoc.leave_type !== LeaveType.UNPAID_LEAVE) {
+    // ============================================
+    // LEAVE BALANCE DEDUCTION LOGIC (FIXED)
+    // ============================================
+
+    // Deduct balance on FIRST approval (manager_approved or direct admin approval from pending)
+    // This ensures balance is deducted when:
+    // 1. Manager approves: pending -> manager_approved
+    // 2. Admin approves directly: pending -> approved
+    // But NOT when admin approves after manager: manager_approved -> approved (already deducted)
+
+    const wasBalanceNotYetDeducted = originalStatus === LeaveStatus.PENDING;
+    const isNowApproved = newStatus === LeaveStatus.MANAGER_APPROVED || newStatus === LeaveStatus.APPROVED;
+
+    if (wasBalanceNotYetDeducted && isNowApproved && leaveDoc.leave_type !== LeaveType.UNPAID_LEAVE) {
       const leaveTypeKey = normalizeLeaveType(leaveDoc.leave_type);
       await db.collection('employees').updateOne(
         { email: leaveDoc.employee_email },
         { $inc: { [`leave_balance.${leaveTypeKey}`]: -leaveDoc.days_count } }
       );
+      console.log(`Deducted ${leaveDoc.days_count} ${leaveTypeKey} from ${leaveDoc.employee_email}`);
+    }
+
+    // Refund balance if admin rejects AFTER manager had already approved
+    // This handles the case where balance was already deducted at manager_approved stage
+    const wasAlreadyDeducted = originalStatus === LeaveStatus.MANAGER_APPROVED;
+    const isNowRejected = newStatus === LeaveStatus.REJECTED;
+
+    if (wasAlreadyDeducted && isNowRejected && leaveDoc.leave_type !== LeaveType.UNPAID_LEAVE) {
+      const leaveTypeKey = normalizeLeaveType(leaveDoc.leave_type);
+      await db.collection('employees').updateOne(
+        { email: leaveDoc.employee_email },
+        { $inc: { [`leave_balance.${leaveTypeKey}`]: leaveDoc.days_count } }
+      );
+      console.log(`Refunded ${leaveDoc.days_count} ${leaveTypeKey} to ${leaveDoc.employee_email} (rejected after manager approval)`);
     }
 
     // Update leave in database
@@ -890,7 +920,8 @@ router.put('/:leaveId', authenticate, requireRole([UserRole.ADMIN]), validate(sc
     normalizeLeaveDates(leaveDoc);
 
     const originalLeave = { ...leaveDoc };
-    const wasApproved = originalLeave.status === LeaveStatus.APPROVED;
+    // Balance was deducted if status is manager_approved OR approved
+    const wasBalanceDeducted = [LeaveStatus.MANAGER_APPROVED, LeaveStatus.APPROVED].includes(originalLeave.status);
     const originalDays = originalLeave.days_count;
     const originalLeaveType = originalLeave.leave_type;
 
@@ -944,23 +975,26 @@ router.put('/:leaveId', authenticate, requireRole([UserRole.ADMIN]), validate(sc
     // Leave balance adjustments
     const newLeaveType = updateDict.leave_type || originalLeaveType;
     const employeeEmail = originalLeave.employee_email;
+    const willBalanceBeDeducted = [LeaveStatus.MANAGER_APPROVED, LeaveStatus.APPROVED].includes(newStatus);
 
-    // Case 1: Leave was approved and is being modified
-    if (wasApproved && originalLeaveType !== LeaveType.UNPAID_LEAVE) {
+    // Case 1: Balance was deducted and leave is being modified
+    if (wasBalanceDeducted && originalLeaveType !== LeaveType.UNPAID_LEAVE) {
       const originalKey = normalizeLeaveType(originalLeaveType);
 
-      if (newStatus !== LeaveStatus.APPROVED) {
-        // Refund original days
+      if (!willBalanceBeDeducted) {
+        // Status changing to pending or rejected - refund original days
         await db.collection('employees').updateOne(
           { email: employeeEmail },
           { $inc: { [`leave_balance.${originalKey}`]: originalDays } }
         );
+        console.log(`Refunded ${originalDays} ${originalKey} to ${employeeEmail} (status changed to ${newStatus})`);
       } else if (newLeaveType !== originalLeaveType) {
-        // Refund original type
+        // Leave type changed - refund original, deduct new
         await db.collection('employees').updateOne(
           { email: employeeEmail },
           { $inc: { [`leave_balance.${originalKey}`]: originalDays } }
         );
+        console.log(`Refunded ${originalDays} ${originalKey} to ${employeeEmail} (leave type changed)`);
 
         // Deduct from new type
         if (newLeaveType !== LeaveType.UNPAID_LEAVE) {
@@ -969,17 +1003,19 @@ router.put('/:leaveId', authenticate, requireRole([UserRole.ADMIN]), validate(sc
             { email: employeeEmail },
             { $inc: { [`leave_balance.${newKey}`]: -newDays } }
           );
+          console.log(`Deducted ${newDays} ${newKey} from ${employeeEmail} (leave type changed)`);
         }
       } else if (newDays !== originalDays) {
-        // Days changed but same type
+        // Days changed but same type - adjust difference
         const daysDiff = newDays - originalDays;
         await db.collection('employees').updateOne(
           { email: employeeEmail },
           { $inc: { [`leave_balance.${originalKey}`]: -daysDiff } }
         );
+        console.log(`Adjusted ${-daysDiff} ${originalKey} for ${employeeEmail} (days changed)`);
       }
-    } else if (!wasApproved && newStatus === LeaveStatus.APPROVED) {
-      // Case 2: Leave was NOT approved but is now being APPROVED
+    } else if (!wasBalanceDeducted && willBalanceBeDeducted) {
+      // Case 2: Balance was NOT deducted but now needs to be (status changed to approved/manager_approved)
       if (newLeaveType !== LeaveType.UNPAID_LEAVE) {
         const newKey = normalizeLeaveType(newLeaveType);
 
@@ -1000,6 +1036,7 @@ router.put('/:leaveId', authenticate, requireRole([UserRole.ADMIN]), validate(sc
           { email: employeeEmail },
           { $inc: { [`leave_balance.${newKey}`]: -newDays } }
         );
+        console.log(`Deducted ${newDays} ${newKey} from ${employeeEmail} (status changed to ${newStatus})`);
       }
     }
 
@@ -1078,13 +1115,16 @@ router.delete('/:leaveId', authenticate, requireRole([UserRole.ADMIN]), async (r
       return res.status(404).json({ detail: 'Leave not found' });
     }
 
-    // Refund balance if was approved
-    if (leaveDoc.status === LeaveStatus.APPROVED && leaveDoc.leave_type !== LeaveType.UNPAID_LEAVE) {
+    // Refund balance if it was deducted (manager_approved or approved status)
+    const wasBalanceDeducted = [LeaveStatus.MANAGER_APPROVED, LeaveStatus.APPROVED].includes(leaveDoc.status);
+
+    if (wasBalanceDeducted && leaveDoc.leave_type !== LeaveType.UNPAID_LEAVE) {
       const leaveTypeKey = normalizeLeaveType(leaveDoc.leave_type);
       await db.collection('employees').updateOne(
         { email: leaveDoc.employee_email },
         { $inc: { [`leave_balance.${leaveTypeKey}`]: leaveDoc.days_count } }
       );
+      console.log(`Refunded ${leaveDoc.days_count} ${leaveTypeKey} to ${leaveDoc.employee_email} (leave deleted)`);
     }
 
     // Delete leave

@@ -11,14 +11,18 @@ const { generateWelcomeEmail, generateNewEmployeeNotificationEmail } = require('
 /**
  * Helper: Get leave balance from configured policy
  * Falls back to default if no policy is configured
+ * Always includes comp_off: 0
  */
 async function getLeaveBalanceFromPolicy(db) {
   try {
     const policy = await db.collection('leave_policies').findOne({}, { projection: { _id: 0 } });
 
     if (!policy || !policy.policies || policy.policies.length === 0) {
-      // Return default if no policy configured
-      return { ...defaultLeaveBalance };
+      // Return default if no policy configured (includes comp_off)
+      return {
+        ...defaultLeaveBalance,
+        comp_off: 0  // Always include comp_off
+      };
     }
 
     const balance = {};
@@ -27,11 +31,19 @@ async function getLeaveBalanceFromPolicy(db) {
       balance[leaveKey] = policyItem.annual_quota;
     }
 
+    // Always include comp_off (even if not in policy)
+    if (!('comp_off' in balance)) {
+      balance.comp_off = 0;
+    }
+
     return balance;
   } catch (error) {
     console.error('Error fetching leave policy:', error);
-    // Fallback to default on error
-    return { ...defaultLeaveBalance };
+    // Fallback to default on error (includes comp_off)
+    return {
+      ...defaultLeaveBalance,
+      comp_off: 0
+    };
   }
 }
 
@@ -62,6 +74,7 @@ router.get('/', authenticate, requireRole([UserRole.ADMIN, UserRole.MANAGER]), a
       .toArray();
 
     // Normalize dates and set id to employee_id for frontend
+    // Also ensure comp_off exists in leave_balance
     for (const emp of employees) {
       if (typeof emp.joining_date === 'string') {
         emp.joining_date = new Date(emp.joining_date);
@@ -70,6 +83,11 @@ router.get('/', authenticate, requireRole([UserRole.ADMIN, UserRole.MANAGER]), a
         emp.created_at = new Date(emp.created_at);
       }
       emp.id = emp.employee_id;
+
+      // Ensure comp_off exists in leave_balance
+      if (emp.leave_balance && !('comp_off' in emp.leave_balance)) {
+        emp.leave_balance.comp_off = 0;
+      }
     }
 
     res.json(employees);
@@ -135,15 +153,17 @@ router.post('/', authenticate, requireRole([UserRole.ADMIN]), validate(schemas.e
 
     // ============================================
     // GET LEAVE BALANCE FROM CONFIGURED POLICY
+    // Always includes comp_off: 0
     // ============================================
-    // If employeeData has custom leave_balance, use it
-    // Otherwise, fetch from the configured leave policy
     let leaveBalance;
     if (employeeData.leave_balance && Object.keys(employeeData.leave_balance).length > 0) {
       // Use provided leave balance (for custom cases)
-      leaveBalance = employeeData.leave_balance;
+      leaveBalance = {
+        ...employeeData.leave_balance,
+        comp_off: employeeData.leave_balance.comp_off ?? 0  // Ensure comp_off exists
+      };
     } else {
-      // Get from configured policy (NEW BEHAVIOR)
+      // Get from configured policy (includes comp_off: 0)
       leaveBalance = await getLeaveBalanceFromPolicy(db);
     }
 
@@ -179,7 +199,7 @@ router.post('/', authenticate, requireRole([UserRole.ADMIN]), validate(schemas.e
       joining_date: employeeData.joining_date || now,
       manager_email: employeeData.manager_email || null,
       manager_name: managerName,
-      leave_balance: leaveBalance,  // Uses policy-based balance
+      leave_balance: leaveBalance,  // Includes comp_off
       created_at: now
     };
 
@@ -410,6 +430,7 @@ router.put('/:userId/role', authenticate, requireRole([UserRole.ADMIN]), validat
 /**
  * PUT /api/employees/:userId/leave-balance
  * Update employee leave balance (admin only)
+ * Now supports comp_off even if it doesn't exist yet
  */
 router.put('/:userId/leave-balance', authenticate, requireRole([UserRole.ADMIN]), validate(schemas.leaveBalanceUpdate), async (req, res) => {
   try {
@@ -438,7 +459,13 @@ router.put('/:userId/leave-balance', authenticate, requireRole([UserRole.ADMIN])
     // Normalize leave type
     const leaveKey = normalizeLeaveType(leave_type);
 
-    if (!(leaveKey in employee.leave_balance)) {
+    // ============================================
+    // KEY FIX: Allow comp_off even if not in leave_balance
+    // ============================================
+    const validLeaveTypes = ['sick_leave', 'casual_leave', 'paid_leave', 'unpaid_leave', 'comp_off'];
+
+    // Check if it's a valid leave type OR exists in employee's leave_balance
+    if (!validLeaveTypes.includes(leaveKey) && !(leaveKey in (employee.leave_balance || {}))) {
       return res.status(400).json({ detail: `Invalid leave type: ${leave_type}` });
     }
 
@@ -446,7 +473,8 @@ router.put('/:userId/leave-balance', authenticate, requireRole([UserRole.ADMIN])
       return res.status(400).json({ detail: 'Days must be greater than 0' });
     }
 
-    const currentBalance = parseFloat(employee.leave_balance[leaveKey] || 0);
+    // Get current balance (default to 0 if doesn't exist)
+    const currentBalance = parseFloat(employee.leave_balance?.[leaveKey] || 0);
     let newBalance;
 
     if (adjustment_type === 'deduct') {
