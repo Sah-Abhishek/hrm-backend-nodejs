@@ -113,17 +113,46 @@ router.post('/', authenticate, requireRole([UserRole.ADMIN]), validate(schemas.e
       return res.status(400).json({ detail: 'User with this email already exists' });
     }
 
-    // Get settings
-    const settings = await db.collection('settings').findOne({});
-    if (!settings) {
-      return res.status(500).json({ detail: 'System settings not initialized' });
+    // ============================================
+    // FIX: ATOMIC COUNTER INCREMENT
+    // This prevents duplicate employee IDs
+    // ============================================
+    const settingsUpdate = await db.collection('settings').findOneAndUpdate(
+      {},
+      { $inc: { employee_id_counter: 1 } },
+      { returnDocument: 'after' }
+    );
+
+    if (!settingsUpdate || !settingsUpdate.value) {
+      // Try to get settings without update (maybe first time)
+      const settings = await db.collection('settings').findOne({});
+      if (!settings) {
+        return res.status(500).json({ detail: 'System settings not initialized' });
+      }
+      // Initialize counter if not exists
+      await db.collection('settings').updateOne(
+        {},
+        { $set: { employee_id_counter: (settings.employee_id_counter || 1000) + 1 } }
+      );
+      var employeeId = `${settings.employee_id_prefix || 'EMP'}${String((settings.employee_id_counter || 1000) + 1).padStart(4, '0')}`;
+    } else {
+      const settings = settingsUpdate.value;
+      var employeeId = `${settings.employee_id_prefix || 'EMP'}${String(settings.employee_id_counter).padStart(4, '0')}`;
+    }
+
+    // Double-check this employee_id doesn't already exist (safety check)
+    const existingEmployee = await db.collection('employees').findOne({ employee_id: employeeId });
+    if (existingEmployee) {
+      // If somehow duplicate, increment again and retry
+      const retrySettings = await db.collection('settings').findOneAndUpdate(
+        {},
+        { $inc: { employee_id_counter: 1 } },
+        { returnDocument: 'after' }
+      );
+      employeeId = `${retrySettings.value.employee_id_prefix || 'EMP'}${String(retrySettings.value.employee_id_counter).padStart(4, '0')}`;
     }
 
     const employeeUuid = generateUUID();
-    const employeeId = `${settings.employee_id_prefix}${String(settings.employee_id_counter).padStart(4, '0')}`;
-
-    // Increment counter
-    await db.collection('settings').updateOne({}, { $inc: { employee_id_counter: 1 } });
 
     // Resolve organization name
     let organizationName = null;
@@ -259,6 +288,9 @@ router.post('/', authenticate, requireRole([UserRole.ADMIN]), validate(schemas.e
 /**
  * PUT /api/employees/:userId
  * Update employee
+ * 
+ * FIX: Now uses EMAIL to find the correct employee, not employee_id
+ * This prevents issues when there are duplicate employee_ids
  */
 router.put('/:userId', authenticate, validate(schemas.employeeUpdate), async (req, res) => {
   try {
@@ -266,22 +298,40 @@ router.put('/:userId', authenticate, validate(schemas.employeeUpdate), async (re
     const { userId } = req.params;
     const updateData = req.validatedBody;
 
-    // Find user by employee_id
-    const user = await db.collection('users').findOne(
-      { employee_id: userId },
-      { projection: { _id: 0 } }
-    );
-    if (!user) {
-      return res.status(404).json({ detail: 'User not found' });
+    // ============================================
+    // FIX: Find by employee_id but get the specific one
+    // If there are duplicates, we need to be more careful
+    // ============================================
+
+    // First, check how many employees have this ID
+    const employeesWithId = await db.collection('employees')
+      .find({ employee_id: userId }, { projection: { _id: 0 } })
+      .toArray();
+
+    if (employeesWithId.length === 0) {
+      return res.status(404).json({ detail: 'Employee not found' });
     }
 
-    // Find employee
-    const employee = await db.collection('employees').findOne(
-      { email: user.email },
+    // If there are multiple employees with same ID (data corruption), 
+    // we need to identify which one to update
+    let employee;
+    if (employeesWithId.length > 1) {
+      console.warn(`WARNING: Multiple employees found with employee_id ${userId}. This indicates data corruption.`);
+      // Try to match by additional criteria from request if available
+      // For now, log the issue and use the non-admin one (as admin should have unique setup)
+      employee = employeesWithId.find(e => e.role !== 'admin') || employeesWithId[0];
+    } else {
+      employee = employeesWithId[0];
+    }
+
+    // Find corresponding user by EMAIL (more reliable)
+    const user = await db.collection('users').findOne(
+      { email: employee.email },
       { projection: { _id: 0 } }
     );
-    if (!employee) {
-      return res.status(404).json({ detail: 'Employee not found' });
+
+    if (!user) {
+      return res.status(404).json({ detail: 'User not found' });
     }
 
     // Permission check
@@ -331,14 +381,17 @@ router.put('/:userId', authenticate, validate(schemas.employeeUpdate), async (re
       }
     }
 
-    // Update employee
+    // ============================================
+    // FIX: Update by EMAIL, not employee_id
+    // This ensures we update the correct record
+    // ============================================
     if (Object.keys(updateDict).length > 0) {
       await db.collection('employees').updateOne(
-        { email: user.email },
+        { email: employee.email },  // Use email instead of employee_id
         { $set: updateDict }
       );
 
-      // Sync user fields
+      // Sync user fields - also by email
       const userSyncFields = {};
       for (const key of ['full_name', 'department', 'designation', 'phone', 'organization_id', 'monthly_salary']) {
         if (key in updateDict) {
@@ -348,7 +401,7 @@ router.put('/:userId', authenticate, validate(schemas.employeeUpdate), async (re
 
       if (Object.keys(userSyncFields).length > 0) {
         await db.collection('users').updateOne(
-          { employee_id: userId },
+          { email: employee.email },  // Use email instead of employee_id
           { $set: userSyncFields }
         );
       }
@@ -356,7 +409,7 @@ router.put('/:userId', authenticate, validate(schemas.employeeUpdate), async (re
 
     // Get updated employee
     const updatedEmployee = await db.collection('employees').findOne(
-      { email: user.email },
+      { email: employee.email },  // Use email
       { projection: { _id: 0 } }
     );
 
@@ -370,6 +423,8 @@ router.put('/:userId', authenticate, validate(schemas.employeeUpdate), async (re
 /**
  * PUT /api/employees/:userId/role
  * Update employee role (admin only)
+ * 
+ * FIX: Better handling of duplicate employee_ids
  */
 router.put('/:userId/role', authenticate, requireRole([UserRole.ADMIN]), validate(schemas.roleUpdate), async (req, res) => {
   try {
@@ -377,22 +432,34 @@ router.put('/:userId/role', authenticate, requireRole([UserRole.ADMIN]), validat
     const { userId } = req.params;
     const { role } = req.validatedBody;
 
-    // Find user
-    const user = await db.collection('users').findOne(
-      { employee_id: userId },
-      { projection: { _id: 0 } }
-    );
-    if (!user) {
-      return res.status(404).json({ detail: 'User not found' });
+    // ============================================
+    // FIX: Handle potential duplicate employee_ids
+    // ============================================
+    const employeesWithId = await db.collection('employees')
+      .find({ employee_id: userId }, { projection: { _id: 0 } })
+      .toArray();
+
+    if (employeesWithId.length === 0) {
+      return res.status(404).json({ detail: 'Employee not found' });
     }
 
-    // Find employee
-    const employee = await db.collection('employees').findOne(
-      { email: user.email },
+    // If duplicates exist, select the non-admin or first one
+    let employee;
+    if (employeesWithId.length > 1) {
+      console.warn(`WARNING: Multiple employees found with employee_id ${userId}`);
+      employee = employeesWithId.find(e => e.role !== 'admin') || employeesWithId[0];
+    } else {
+      employee = employeesWithId[0];
+    }
+
+    // Find user by email
+    const user = await db.collection('users').findOne(
+      { email: employee.email },
       { projection: { _id: 0 } }
     );
-    if (!employee) {
-      return res.status(404).json({ detail: 'Employee not found' });
+
+    if (!user) {
+      return res.status(404).json({ detail: 'User not found' });
     }
 
     // Validate role
@@ -400,25 +467,28 @@ router.put('/:userId/role', authenticate, requireRole([UserRole.ADMIN]), validat
       return res.status(400).json({ detail: 'Invalid role' });
     }
 
-    // Prevent admin self-demotion
+    // Prevent admin self-demotion (check by email, not employee_id)
     if (user.role === UserRole.ADMIN && role !== UserRole.ADMIN && req.user.email === user.email) {
       return res.status(400).json({ detail: 'Admin cannot change their own role' });
     }
 
-    // Update both collections
+    // ============================================
+    // FIX: Update by EMAIL, not employee_id
+    // ============================================
     await db.collection('users').updateOne(
-      { employee_id: userId },
+      { email: employee.email },
       { $set: { role } }
     );
 
     await db.collection('employees').updateOne(
-      { employee_id: userId },
+      { email: employee.email },
       { $set: { role } }
     );
 
     res.json({
       message: 'Role updated successfully',
       employee_id: userId,
+      email: employee.email,
       new_role: role
     });
   } catch (error) {
@@ -438,16 +508,24 @@ router.put('/:userId/leave-balance', authenticate, requireRole([UserRole.ADMIN])
     const { userId } = req.params;
     const { leave_type, reason, adjustment_type, days } = req.validatedBody;
 
-    // Find user
-    const user = await db.collection('users').findOne(
+    // Find user - try by id first, then employee_id
+    let user = await db.collection('users').findOne(
       { id: userId },
       { projection: { _id: 0 } }
     );
+
+    if (!user) {
+      user = await db.collection('users').findOne(
+        { employee_id: userId },
+        { projection: { _id: 0 } }
+      );
+    }
+
     if (!user) {
       return res.status(404).json({ detail: 'User not found' });
     }
 
-    // Find employee
+    // Find employee by email
     const employee = await db.collection('employees').findOne(
       { email: user.email },
       { projection: { _id: 0 } }
@@ -488,16 +566,17 @@ router.put('/:userId/leave-balance', authenticate, requireRole([UserRole.ADMIN])
       return res.status(400).json({ detail: "Invalid adjustment type (must be 'add' or 'deduct')" });
     }
 
-    // Update balance
+    // Update balance by email
     await db.collection('employees').updateOne(
-      { email: user.email },
+      { email: employee.email },
       { $set: { [`leave_balance.${leaveKey}`]: newBalance } }
     );
 
     // Audit log
     await db.collection('leave_adjustments').insertOne({
       user_id: userId,
-      employee_id: employee.id,
+      employee_id: employee.employee_id,
+      employee_email: employee.email,
       leave_type: leaveKey,
       adjustment_type,
       days,
@@ -535,9 +614,14 @@ router.delete('/:employeeId', authenticate, requireRole([UserRole.ADMIN]), async
       return res.status(404).json({ detail: 'Employee not found' });
     }
 
-    // Delete user and employee
+    // Prevent deleting yourself
+    if (employee.email === req.user.email) {
+      return res.status(400).json({ detail: 'Cannot delete your own account' });
+    }
+
+    // Delete by email (more reliable)
     await db.collection('users').deleteOne({ email: employee.email });
-    await db.collection('employees').deleteOne({ employee_id: employeeId });
+    await db.collection('employees').deleteOne({ email: employee.email });
 
     res.json({ message: 'Employee deleted successfully' });
   } catch (error) {
@@ -547,19 +631,22 @@ router.delete('/:employeeId', authenticate, requireRole([UserRole.ADMIN]), async
 });
 
 /**
- * GET /api/employee-id-settings
+ * GET /api/employees/employee-id-settings
  * Get employee ID settings (admin only)
  */
 router.get('/employee-id-settings', authenticate, requireRole([UserRole.ADMIN]), async (req, res) => {
   try {
     const db = getDB();
-    const settings = await db.collection('employee_id_settings').findOne({}, { projection: { _id: 0 } });
+    const settings = await db.collection('settings').findOne({}, { projection: { _id: 0, employee_id_prefix: 1, employee_id_counter: 1 } });
 
     if (!settings) {
       return res.json({ prefix: 'EMP', counter: 1000 });
     }
 
-    res.json(settings);
+    res.json({
+      prefix: settings.employee_id_prefix || 'EMP',
+      counter: settings.employee_id_counter || 1000
+    });
   } catch (error) {
     console.error('Get employee ID settings error:', error);
     res.status(500).json({ detail: 'Internal server error' });
@@ -567,29 +654,120 @@ router.get('/employee-id-settings', authenticate, requireRole([UserRole.ADMIN]),
 });
 
 /**
- * POST /api/employee-id-settings
+ * POST /api/employees/employee-id-settings
  * Update employee ID settings (admin only)
  */
 router.post('/employee-id-settings', authenticate, requireRole([UserRole.ADMIN]), validate(schemas.employeeIdSettings), async (req, res) => {
   try {
     const db = getDB();
-    const settingsData = req.validatedBody;
+    const { prefix, counter } = req.validatedBody;
 
-    const settingsDoc = {
-      ...settingsData,
-      updated_at: new Date(),
-      updated_by: req.user.email
-    };
+    // Update in settings collection
+    await db.collection('settings').updateOne(
+      {},
+      {
+        $set: {
+          employee_id_prefix: prefix || 'EMP',
+          employee_id_counter: counter || 1000,
+          updated_at: new Date(),
+          updated_by: req.user.email
+        }
+      },
+      { upsert: true }
+    );
 
-    // Upsert settings
-    await db.collection('employee_id_settings').deleteMany({});
-    await db.collection('employee_id_settings').insertOne(settingsDoc);
-
-    delete settingsDoc._id;
-
-    res.json({ message: 'Employee ID settings updated successfully', settings: settingsDoc });
+    res.json({
+      message: 'Employee ID settings updated successfully',
+      settings: { prefix, counter }
+    });
   } catch (error) {
     console.error('Update employee ID settings error:', error);
+    res.status(500).json({ detail: 'Internal server error' });
+  }
+});
+
+/**
+ * GET /api/employees/check-duplicates
+ * Check for duplicate employee IDs (admin only) - utility endpoint
+ */
+router.get('/check-duplicates', authenticate, requireRole([UserRole.ADMIN]), async (req, res) => {
+  try {
+    const db = getDB();
+
+    // Find duplicate employee_ids
+    const duplicates = await db.collection('employees').aggregate([
+      { $group: { _id: '$employee_id', count: { $sum: 1 }, emails: { $push: '$email' } } },
+      { $match: { count: { $gt: 1 } } }
+    ]).toArray();
+
+    if (duplicates.length === 0) {
+      return res.json({ message: 'No duplicate employee IDs found', duplicates: [] });
+    }
+
+    res.json({
+      message: `Found ${duplicates.length} duplicate employee ID(s)`,
+      duplicates: duplicates.map(d => ({
+        employee_id: d._id,
+        count: d.count,
+        emails: d.emails
+      }))
+    });
+  } catch (error) {
+    console.error('Check duplicates error:', error);
+    res.status(500).json({ detail: 'Internal server error' });
+  }
+});
+
+/**
+ * POST /api/employees/fix-duplicate/:employeeId
+ * Fix a duplicate employee ID by assigning a new one (admin only)
+ */
+router.post('/fix-duplicate/:employeeId', authenticate, requireRole([UserRole.ADMIN]), async (req, res) => {
+  try {
+    const db = getDB();
+    const { employeeId } = req.params;
+    const { email } = req.body;  // Which email to fix
+
+    if (!email) {
+      return res.status(400).json({ detail: 'Email is required to identify which record to fix' });
+    }
+
+    // Find the employee
+    const employee = await db.collection('employees').findOne({ employee_id: employeeId, email });
+    if (!employee) {
+      return res.status(404).json({ detail: 'Employee not found with that ID and email combination' });
+    }
+
+    // Generate new employee ID
+    const settingsUpdate = await db.collection('settings').findOneAndUpdate(
+      {},
+      { $inc: { employee_id_counter: 1 } },
+      { returnDocument: 'after' }
+    );
+
+    const settings = settingsUpdate.value;
+    const newEmployeeId = `${settings.employee_id_prefix || 'EMP'}${String(settings.employee_id_counter).padStart(4, '0')}`;
+
+    // Update employee
+    await db.collection('employees').updateOne(
+      { email },
+      { $set: { employee_id: newEmployeeId, id: newEmployeeId } }
+    );
+
+    // Update user
+    await db.collection('users').updateOne(
+      { email },
+      { $set: { employee_id: newEmployeeId } }
+    );
+
+    res.json({
+      message: 'Employee ID fixed successfully',
+      old_id: employeeId,
+      new_id: newEmployeeId,
+      email
+    });
+  } catch (error) {
+    console.error('Fix duplicate error:', error);
     res.status(500).json({ detail: 'Internal server error' });
   }
 });

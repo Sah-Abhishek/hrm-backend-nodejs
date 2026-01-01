@@ -94,7 +94,7 @@ const schemas = {
     department: Joi.string(),
     designation: Joi.string(),
     phone: Joi.string().allow(null, ''),
-    monthly_salary: Joi.number(),
+    monthly_salary: Joi.number().allow(null, ''),
     organization_id: Joi.string().allow(null, ''),
     manager_email: Joi.string().email().allow(null, '')
   }),
