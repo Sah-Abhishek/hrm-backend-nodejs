@@ -82,10 +82,11 @@ const schemas = {
     joining_date: Joi.date().default(() => new Date()),
     manager_email: Joi.string().email().allow(null, ''),
     leave_balance: Joi.object({
-      sick_leave: Joi.number().default(12),
-      casual_leave: Joi.number().default(12),
-      paid_leave: Joi.number().default(15),
-      unpaid_leave: Joi.number().default(0)
+      sick_leave: Joi.number().default(6),
+      casual_leave: Joi.number().default(6),
+      paid_leave: Joi.number().default(0),
+      unpaid_leave: Joi.number().default(0),
+      earned_leave: Joi.number().default(1)
     }).default()
   }),
 
