@@ -21,6 +21,7 @@
     "jsonwebtoken": "^9.0.2",
     "mongodb": "^6.3.0",
     "multer": "^2.0.2",
+    "node-cron": "^4.2.1",
     "node-mailjet": "^6.0.5",
     "seed": "^0.4.4",
     "twilio": "^4.19.0",

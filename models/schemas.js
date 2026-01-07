@@ -18,8 +18,14 @@ const LeaveType = {
   SICK_LEAVE: 'Sick Leave',
   CASUAL_LEAVE: 'Casual Leave',
   PAID_LEAVE: 'Paid Leave',
+  EARNED_LEAVE: 'Earned Leave',
   UNPAID_LEAVE: 'Unpaid Leave',
   COMP_OFF: 'Comp Off'
+};
+
+const CreditType = {
+  MONTHLY: 'monthly',
+  ANNUALLY: 'annually'
 };
 
 const AttendanceStatus = {
@@ -82,11 +88,11 @@ const schemas = {
     joining_date: Joi.date().default(() => new Date()),
     manager_email: Joi.string().email().allow(null, ''),
     leave_balance: Joi.object({
-      sick_leave: Joi.number().default(6),
+      sick_leave: Joi.number().default(0),
       casual_leave: Joi.number().default(6),
+      earned_leave: Joi.number().default(0),
       paid_leave: Joi.number().default(0),
-      unpaid_leave: Joi.number().default(0),
-      earned_leave: Joi.number().default(1)
+      unpaid_leave: Joi.number().default(0)
     }).default()
   }),
 
@@ -97,7 +103,8 @@ const schemas = {
     phone: Joi.string().allow(null, ''),
     monthly_salary: Joi.number().allow(null, ''),
     organization_id: Joi.string().allow(null, ''),
-    manager_email: Joi.string().email().allow(null, '')
+    manager_email: Joi.string().email().allow(null, ''),
+    joining_date: Joi.date().allow(null)  // Added joining_date to update schema
   }),
 
   roleUpdate: Joi.object({
@@ -147,19 +154,41 @@ const schemas = {
     description: Joi.string().allow(null, '')
   }),
 
-  // Leave Policy
+  // Leave Policy - Updated with new fields
   leavePolicyItem: Joi.object({
     leave_type: Joi.string().required(),
     annual_quota: Joi.number().required(),
-    order: Joi.number().default(0)
+    order: Joi.number().default(0),
+    credit_type: Joi.string().valid('monthly', 'annually').default('annually'),
+    monthly_credit: Joi.number().default(0), // Amount credited per month
+    advance_days_required: Joi.number().min(0).default(0), // Days in advance required
+    encashment_allowed: Joi.boolean().default(false),
+    carry_forward_allowed: Joi.boolean().default(false),
+    max_carry_forward_days: Joi.number().min(0).default(0),
+    clubbing_allowed_with: Joi.array().items(Joi.string()).default([]), // Leave types allowed to club with
+    clubbing_not_allowed_with: Joi.array().items(Joi.string()).default([]) // Leave types NOT allowed to club with
   }),
 
   leavePolicy: Joi.object({
     policies: Joi.array().items(Joi.object({
       leave_type: Joi.string().required(),
       annual_quota: Joi.number().required(),
-      order: Joi.number().default(0)
-    })).required()
+      order: Joi.number().default(0),
+      credit_type: Joi.string().valid('monthly', 'annually').default('annually'),
+      monthly_credit: Joi.number().default(0),
+      advance_days_required: Joi.number().min(0).default(0),
+      encashment_allowed: Joi.boolean().default(false),
+      carry_forward_allowed: Joi.boolean().default(false),
+      max_carry_forward_days: Joi.number().min(0).default(0),
+      clubbing_allowed_with: Joi.array().items(Joi.string()).default([]),
+      clubbing_not_allowed_with: Joi.array().items(Joi.string()).default([])
+    })).required(),
+    // Global clubbing rules
+    clubbing_rules: Joi.array().items(Joi.object({
+      leave_type_1: Joi.string().required(),
+      leave_type_2: Joi.string().required(),
+      allowed: Joi.boolean().required()
+    })).default([])
   }),
 
   // Comp-Off
@@ -267,10 +296,10 @@ const schemas = {
 
   recurringHoliday: Joi.object({
     name: Joi.string().required(),
-    day_of_week: Joi.number().min(0).max(6).required(), // 0=Sunday, 6=Saturday
+    day_of_week: Joi.number().min(0).max(6).required(),
     scope: Joi.string().valid('year', 'month').required(),
     year: Joi.number().required(),
-    month: Joi.number().min(1).max(12).allow(null), // Required if scope is 'month'
+    month: Joi.number().min(1).max(12).allow(null),
     type: Joi.string().valid('public', 'optional', 'restricted').default('public')
   }),
 
@@ -284,7 +313,7 @@ const schemas = {
   // Attendance
   attendanceMark: Joi.object({
     employee_id: Joi.string().required(),
-    date: Joi.string().pattern(/^\d{4}-\d{2}-\d{2}$/).required(), // YYYY-MM-DD
+    date: Joi.string().pattern(/^\d{4}-\d{2}-\d{2}$/).required(),
     status: Joi.string().valid(...Object.values(AttendanceStatus), '').required()
   }),
 
@@ -331,12 +360,18 @@ const schemas = {
   })
 };
 
-// Default leave balance
+// Default leave balance - All start at 0, calculated based on joining date
+// Monthly credit rates:
+// - Casual Leave: 0.5 per month
+// - Sick Leave: 0.5 per month  
+// - Earned Leave: 1 per month
 const defaultLeaveBalance = {
-  sick_leave: 10,
-  casual_leave: 15,
-  paid_leave: 20,
-  unpaid_leave: 0
+  earned_leave: 0,
+  sick_leave: 0,
+  casual_leave: 0,
+  paid_leave: 0,
+  unpaid_leave: 0,
+  comp_off: 0
 };
 
 // Default salary template
@@ -357,14 +392,74 @@ const defaultSalaryTemplate = {
   ]
 };
 
-// Default leave policy
+// Default leave policy - Updated with new company policy
+// Monthly credits:
+// - Casual Leave: 0.5 per month
+// - Sick Leave: 0.5 per month
+// - Earned Leave: 1 per month
 const defaultLeavePolicy = {
   id: 'default_policy',
   policies: [
-    { leave_type: 'Sick Leave', annual_quota: 12, order: 1 },
-    { leave_type: 'Casual Leave', annual_quota: 12, order: 2 },
-    { leave_type: 'Paid Leave', annual_quota: 15, order: 3 },
-    { leave_type: 'Unpaid Leave', annual_quota: 0, order: 4 }
+    {
+      leave_type: 'Earned Leave',
+      annual_quota: 12,
+      order: 1,
+      credit_type: 'monthly',
+      monthly_credit: 1,  // 1 day per month
+      advance_days_required: 7,
+      encashment_allowed: true,
+      carry_forward_allowed: true,
+      max_carry_forward_days: 30,
+      clubbing_allowed_with: ['Sick Leave', 'Earned Leave'],
+      clubbing_not_allowed_with: []
+    },
+    {
+      leave_type: 'Sick Leave',
+      annual_quota: 6,
+      order: 2,
+      credit_type: 'monthly',
+      monthly_credit: 0.5,  // 0.5 day per month
+      advance_days_required: 0,
+      encashment_allowed: false,
+      carry_forward_allowed: false,
+      max_carry_forward_days: 0,
+      clubbing_allowed_with: ['Earned Leave', 'Sick Leave'],
+      clubbing_not_allowed_with: ['Casual Leave']
+    },
+    {
+      leave_type: 'Casual Leave',
+      annual_quota: 6,
+      order: 3,
+      credit_type: 'monthly',
+      monthly_credit: 0.5,  // 0.5 day per month
+      advance_days_required: 0,
+      encashment_allowed: false,
+      carry_forward_allowed: false,
+      max_carry_forward_days: 0,
+      clubbing_allowed_with: ['Casual Leave', 'Earned Leave'],
+      clubbing_not_allowed_with: ['Sick Leave']
+    },
+    {
+      leave_type: 'Unpaid Leave',
+      annual_quota: 0,
+      order: 4,
+      credit_type: 'annually',
+      monthly_credit: 0,
+      advance_days_required: 0,
+      encashment_allowed: false,
+      carry_forward_allowed: false,
+      max_carry_forward_days: 0,
+      clubbing_allowed_with: [],
+      clubbing_not_allowed_with: []
+    }
+  ],
+  // Global clubbing rules for easy reference
+  clubbing_rules: [
+    { leave_type_1: 'Sick Leave', leave_type_2: 'Earned Leave', allowed: true },
+    { leave_type_1: 'Sick Leave', leave_type_2: 'Casual Leave', allowed: false },
+    { leave_type_1: 'Sick Leave', leave_type_2: 'Sick Leave', allowed: true },
+    { leave_type_1: 'Casual Leave', leave_type_2: 'Earned Leave', allowed: true },
+    { leave_type_1: 'Earned Leave', leave_type_2: 'Earned Leave', allowed: true }
   ]
 };
 
@@ -373,6 +468,7 @@ module.exports = {
   UserRole,
   LeaveStatus,
   LeaveType,
+  CreditType,
   AttendanceStatus,
   ReimbursementStatus,
   ReimbursementCategory,

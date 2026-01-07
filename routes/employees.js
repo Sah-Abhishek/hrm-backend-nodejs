@@ -9,29 +9,132 @@ const { sendEmailNotification } = require('../services/emailService');
 const { generateWelcomeEmail, generateNewEmployeeNotificationEmail } = require('../utils/emailTemplates');
 
 /**
- * Helper: Get leave balance from configured policy
- * Falls back to default if no policy is configured
- * Always includes comp_off: 0
+ * Default monthly credit rates for leave types
+ * - Casual Leave: 0.5 per month
+ * - Sick Leave: 0.5 per month
+ * - Earned Leave: 1 per month
  */
-async function getLeaveBalanceFromPolicy(db) {
+const DEFAULT_MONTHLY_CREDITS = {
+  'casual_leave': 0.5,
+  'sick_leave': 0.5,
+  'earned_leave': 1
+};
+
+/**
+ * Helper: Calculate months since joining date
+ * @param {Date} joiningDate - Employee's joining date
+ * @returns {number} - Number of complete months since joining
+ */
+function calculateMonthsSinceJoining(joiningDate) {
+  const now = new Date();
+  const joining = new Date(joiningDate);
+
+  let months = (now.getFullYear() - joining.getFullYear()) * 12;
+  months += now.getMonth() - joining.getMonth();
+
+  if (now.getDate() < joining.getDate()) {
+    months--;
+  }
+
+  return Math.max(0, months);
+}
+
+/**
+ * Helper: Calculate accrued balance for monthly-credited leaves
+ * @param {Date} joiningDate - Employee's joining date
+ * @param {number} monthlyCredit - Days credited per month
+ * @param {number} annualQuota - Maximum annual quota (cap)
+ * @returns {number} - Accrued balance
+ */
+function calculateAccruedBalance(joiningDate, monthlyCredit, annualQuota) {
+  if (!joiningDate || !monthlyCredit) return 0;
+
+  const months = calculateMonthsSinceJoining(joiningDate);
+  const accrued = months * monthlyCredit;
+
+  // Round to 1 decimal place and cap at annual quota
+  return Math.min(Math.round(accrued * 10) / 10, annualQuota);
+}
+
+/**
+ * Helper: Get monthly credit rate for a leave type
+ * Uses policy if available, otherwise falls back to defaults
+ */
+function getMonthlyCredit(policyItem, leaveKey) {
+  if (policyItem && policyItem.monthly_credit !== undefined && policyItem.monthly_credit > 0) {
+    return policyItem.monthly_credit;
+  }
+  return DEFAULT_MONTHLY_CREDITS[leaveKey] || 0;
+}
+
+/**
+ * Helper: Get leave balance from configured policy
+ * Now properly handles monthly vs annual credits with default rates:
+ * - Casual Leave: 0.5 per month
+ * - Sick Leave: 0.5 per month
+ * - Earned Leave: 1 per month
+ * @param {Object} db - Database connection
+ * @param {Date} joiningDate - Employee's joining date (for monthly credit calculation)
+ */
+async function getLeaveBalanceFromPolicy(db, joiningDate = null) {
   try {
     const policy = await db.collection('leave_policies').findOne({}, { projection: { _id: 0 } });
+    const effectiveJoiningDate = joiningDate || new Date();
+
+    // Default balance structure
+    const defaultBalance = {
+      earned_leave: 0,
+      sick_leave: 0,
+      casual_leave: 0,
+      paid_leave: 0,
+      unpaid_leave: 0,
+      comp_off: 0
+    };
 
     if (!policy || !policy.policies || policy.policies.length === 0) {
-      // Return default if no policy configured (includes comp_off)
+      // No policy configured - use default monthly credits
+      const months = calculateMonthsSinceJoining(effectiveJoiningDate);
+
       return {
-        ...defaultLeaveBalance,
-        comp_off: 0  // Always include comp_off
+        earned_leave: Math.round(months * DEFAULT_MONTHLY_CREDITS.earned_leave * 10) / 10,
+        sick_leave: Math.round(months * DEFAULT_MONTHLY_CREDITS.sick_leave * 10) / 10,
+        casual_leave: Math.round(months * DEFAULT_MONTHLY_CREDITS.casual_leave * 10) / 10,
+        paid_leave: 0,
+        unpaid_leave: 0,
+        comp_off: 0
       };
     }
 
-    const balance = {};
+    const balance = { ...defaultBalance };
+
     for (const policyItem of policy.policies) {
       const leaveKey = normalizeLeaveType(policyItem.leave_type);
-      balance[leaveKey] = policyItem.annual_quota;
+      const monthlyCredit = getMonthlyCredit(policyItem, leaveKey);
+
+      // Check credit type from policy
+      if (policyItem.credit_type === 'monthly' || monthlyCredit > 0) {
+        // Calculate accrued balance based on months since joining
+        const maxBalance = policyItem.annual_quota || (monthlyCredit * 12);
+        balance[leaveKey] = calculateAccruedBalance(effectiveJoiningDate, monthlyCredit, maxBalance);
+      } else if (policyItem.credit_type === 'annually') {
+        // Annual credit - assign full quota
+        balance[leaveKey] = policyItem.annual_quota || 0;
+      } else {
+        // Fallback - use default monthly credit if available
+        if (DEFAULT_MONTHLY_CREDITS[leaveKey]) {
+          const maxBalance = policyItem.annual_quota || (DEFAULT_MONTHLY_CREDITS[leaveKey] * 12);
+          balance[leaveKey] = calculateAccruedBalance(
+            effectiveJoiningDate,
+            DEFAULT_MONTHLY_CREDITS[leaveKey],
+            maxBalance
+          );
+        } else {
+          balance[leaveKey] = policyItem.annual_quota || 0;
+        }
+      }
     }
 
-    // Always include comp_off (even if not in policy)
+    // Ensure comp_off exists
     if (!('comp_off' in balance)) {
       balance.comp_off = 0;
     }
@@ -39,9 +142,14 @@ async function getLeaveBalanceFromPolicy(db) {
     return balance;
   } catch (error) {
     console.error('Error fetching leave policy:', error);
-    // Fallback to default on error (includes comp_off)
+    // Fallback to default on error
+    const months = calculateMonthsSinceJoining(joiningDate || new Date());
     return {
-      ...defaultLeaveBalance,
+      earned_leave: Math.round(months * DEFAULT_MONTHLY_CREDITS.earned_leave * 10) / 10,
+      sick_leave: Math.round(months * DEFAULT_MONTHLY_CREDITS.sick_leave * 10) / 10,
+      casual_leave: Math.round(months * DEFAULT_MONTHLY_CREDITS.casual_leave * 10) / 10,
+      paid_leave: 0,
+      unpaid_leave: 0,
       comp_off: 0
     };
   }
@@ -182,9 +290,11 @@ router.post('/', authenticate, requireRole([UserRole.ADMIN]), validate(schemas.e
 
     // ============================================
     // GET LEAVE BALANCE FROM CONFIGURED POLICY
-    // Always includes comp_off: 0
+    // Now properly calculates monthly credits based on joining date
     // ============================================
+    const joiningDate = employeeData.joining_date || now;
     let leaveBalance;
+
     if (employeeData.leave_balance && Object.keys(employeeData.leave_balance).length > 0) {
       // Use provided leave balance (for custom cases)
       leaveBalance = {
@@ -192,8 +302,8 @@ router.post('/', authenticate, requireRole([UserRole.ADMIN]), validate(schemas.e
         comp_off: employeeData.leave_balance.comp_off ?? 0  // Ensure comp_off exists
       };
     } else {
-      // Get from configured policy (includes comp_off: 0)
-      leaveBalance = await getLeaveBalanceFromPolicy(db);
+      // Get from configured policy - now with joining date for monthly credit calculation
+      leaveBalance = await getLeaveBalanceFromPolicy(db, joiningDate);
     }
 
     // Create user document
@@ -225,10 +335,10 @@ router.post('/', authenticate, requireRole([UserRole.ADMIN]), validate(schemas.e
       phone: employeeData.phone || null,
       organization_id: employeeData.organization_id || null,
       organization_name: organizationName,
-      joining_date: employeeData.joining_date || now,
+      joining_date: joiningDate,
       manager_email: employeeData.manager_email || null,
       manager_name: managerName,
-      leave_balance: leaveBalance,  // Includes comp_off
+      leave_balance: leaveBalance,  // Includes comp_off and proper monthly credit calculation
       created_at: now
     };
 
@@ -339,8 +449,8 @@ router.put('/:userId', authenticate, validate(schemas.employeeUpdate), async (re
       return res.status(403).json({ detail: 'Not enough permissions' });
     }
 
-    // Allowed fields only
-    const allowedFields = ['full_name', 'department', 'designation', 'phone', 'organization_id', 'manager_email', 'monthly_salary'];
+    // Allowed fields only - NOW INCLUDES joining_date
+    const allowedFields = ['full_name', 'department', 'designation', 'phone', 'organization_id', 'manager_email', 'monthly_salary', 'joining_date'];
     const updateDict = {};
 
     for (const key of Object.keys(updateData)) {
@@ -379,6 +489,13 @@ router.put('/:userId', authenticate, validate(schemas.employeeUpdate), async (re
       } else {
         updateDict.organization_name = null;
       }
+    }
+
+    // ============================================
+    // Handle joining_date update - convert to Date object
+    // ============================================
+    if ('joining_date' in updateDict && updateDict.joining_date) {
+      updateDict.joining_date = new Date(updateDict.joining_date);
     }
 
     // ============================================
@@ -540,7 +657,7 @@ router.put('/:userId/leave-balance', authenticate, requireRole([UserRole.ADMIN])
     // ============================================
     // KEY FIX: Allow comp_off even if not in leave_balance
     // ============================================
-    const validLeaveTypes = ['sick_leave', 'casual_leave', 'paid_leave', 'unpaid_leave', 'comp_off'];
+    const validLeaveTypes = ['sick_leave', 'casual_leave', 'paid_leave', 'unpaid_leave', 'comp_off', 'earned_leave'];
 
     // Check if it's a valid leave type OR exists in employee's leave_balance
     if (!validLeaveTypes.includes(leaveKey) && !(leaveKey in (employee.leave_balance || {}))) {
@@ -772,6 +889,169 @@ router.post('/fix-duplicate/:employeeId', authenticate, requireRole([UserRole.AD
   }
 });
 
+/**
+ * POST /api/employees/recalculate-leave-balance/:employeeId
+ * Recalculate leave balance for an employee based on current policy and joining date
+ * (admin only)
+ */
+router.post('/recalculate-leave-balance/:employeeId', authenticate, requireRole([UserRole.ADMIN]), async (req, res) => {
+  try {
+    const db = getDB();
+    const { employeeId } = req.params;
+
+    // Find employee
+    const employee = await db.collection('employees').findOne(
+      { employee_id: employeeId },
+      { projection: { _id: 0 } }
+    );
+
+    if (!employee) {
+      return res.status(404).json({ detail: 'Employee not found' });
+    }
+
+    // Get new leave balance based on policy and joining date
+    const newBalance = await getLeaveBalanceFromPolicy(db, employee.joining_date);
+
+    // Update employee's leave balance
+    await db.collection('employees').updateOne(
+      { email: employee.email },
+      { $set: { leave_balance: newBalance } }
+    );
+
+    res.json({
+      message: 'Leave balance recalculated successfully',
+      employee_id: employeeId,
+      joining_date: employee.joining_date,
+      new_balance: newBalance
+    });
+  } catch (error) {
+    console.error('Recalculate leave balance error:', error);
+    res.status(500).json({ detail: 'Internal server error' });
+  }
+});
+
+// ============================================
+// TEST/SIMULATION ENDPOINT (for verifying future dates)
+// ============================================
+
+/**
+ * GET /api/employees/simulate-balance/:employeeId
+ * Simulate what an employee's leave balance will be on a given date
+ * Query params: ?simulate_date=2026-09-07
+ * 
+ * This is useful for testing future joining dates
+ */
+router.get('/simulate-balance/:employeeId', authenticate, requireRole([UserRole.ADMIN]), async (req, res) => {
+  try {
+    const db = getDB();
+    const { employeeId } = req.params;
+    const { simulate_date } = req.query;
+
+    const employee = await db.collection('employees').findOne(
+      { employee_id: employeeId },
+      { projection: { _id: 0 } }
+    );
+
+    if (!employee) {
+      return res.status(404).json({ detail: 'Employee not found' });
+    }
+
+    if (!employee.joining_date) {
+      return res.status(400).json({ detail: 'Employee has no joining date set' });
+    }
+
+    const joiningDate = new Date(employee.joining_date);
+    const simulatedDate = simulate_date ? new Date(simulate_date) : new Date();
+
+    // Calculate months since joining for the simulated date
+    let months = (simulatedDate.getFullYear() - joiningDate.getFullYear()) * 12;
+    months += simulatedDate.getMonth() - joiningDate.getMonth();
+    if (simulatedDate.getDate() < joiningDate.getDate()) {
+      months--;
+    }
+    months = Math.max(0, months);
+
+    // Calculate balances
+    const simulatedBalance = {
+      casual_leave: Math.min(Math.round(months * DEFAULT_MONTHLY_CREDITS.casual_leave * 10) / 10, 6),
+      sick_leave: Math.min(Math.round(months * DEFAULT_MONTHLY_CREDITS.sick_leave * 10) / 10, 6),
+      earned_leave: Math.min(Math.round(months * DEFAULT_MONTHLY_CREDITS.earned_leave * 10) / 10, 12),
+      comp_off: employee.leave_balance?.comp_off || 0,
+      unpaid_leave: 0
+    };
+
+    res.json({
+      employee: {
+        employee_id: employee.employee_id,
+        full_name: employee.full_name,
+        joining_date: joiningDate.toISOString().split('T')[0]
+      },
+      simulation: {
+        simulated_date: simulatedDate.toISOString().split('T')[0],
+        months_since_joining: months,
+        is_future_date: simulatedDate > new Date(),
+        has_joined: simulatedDate >= joiningDate
+      },
+      current_stored_balance: employee.leave_balance || {},
+      simulated_balance: simulatedBalance,
+      calculation_details: {
+        casual_leave: `${months} months × 0.5 = ${months * 0.5} (max 6) → ${simulatedBalance.casual_leave}`,
+        sick_leave: `${months} months × 0.5 = ${months * 0.5} (max 6) → ${simulatedBalance.sick_leave}`,
+        earned_leave: `${months} months × 1.0 = ${months * 1.0} (max 12) → ${simulatedBalance.earned_leave}`
+      }
+    });
+  } catch (error) {
+    console.error('Simulate balance error:', error);
+    res.status(500).json({ detail: 'Internal server error' });
+  }
+});
+
+/**
+ * POST /api/employees/recalculate-all-balances
+ * Recalculate leave balances for all employees based on their joining dates
+ * Useful after policy changes or for periodic recalculation
+ */
+router.post('/recalculate-all-balances', authenticate, requireRole([UserRole.ADMIN]), async (req, res) => {
+  try {
+    const db = getDB();
+    const employees = await db.collection('employees').find({}).toArray();
+
+    const results = [];
+
+    for (const employee of employees) {
+      const joiningDate = employee.joining_date || new Date();
+      const newBalance = await getLeaveBalanceFromPolicy(db, joiningDate);
+
+      // Preserve comp_off from existing balance
+      newBalance.comp_off = employee.leave_balance?.comp_off || 0;
+
+      await db.collection('employees').updateOne(
+        { id: employee.id },
+        { $set: { leave_balance: newBalance } }
+      );
+
+      results.push({
+        employee_id: employee.employee_id,
+        name: employee.full_name,
+        joining_date: joiningDate,
+        new_balance: newBalance
+      });
+    }
+
+    res.json({
+      status: 'success',
+      message: `Recalculated balances for ${results.length} employees`,
+      results
+    });
+  } catch (error) {
+    console.error('Recalculate all balances error:', error);
+    res.status(500).json({ detail: 'Internal server error' });
+  }
+});
+
 // Export helper for potential use elsewhere
 module.exports = router;
 module.exports.getLeaveBalanceFromPolicy = getLeaveBalanceFromPolicy;
+module.exports.calculateAccruedBalance = calculateAccruedBalance;
+module.exports.calculateMonthsSinceJoining = calculateMonthsSinceJoining;
+module.exports.DEFAULT_MONTHLY_CREDITS = DEFAULT_MONTHLY_CREDITS;

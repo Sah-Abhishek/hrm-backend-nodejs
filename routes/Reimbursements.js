@@ -114,6 +114,149 @@ router.post('/apply', authenticate, requireRole([UserRole.EMPLOYEE, UserRole.MAN
 });
 
 /**
+ * PUT /api/reimbursements/:id
+ * Edit reimbursement (only if pending, only by owner)
+ */
+router.put('/:id', authenticate, upload.single('bill_image'), async (req, res) => {
+  try {
+    const db = getDB();
+    const { id } = req.params;
+    const { title, category, amount, description, expense_date, remove_bill } = req.body;
+
+    // Get reimbursement
+    const reimbursement = await db.collection('reimbursements').findOne(
+      { id },
+      { projection: { _id: 0 } }
+    );
+
+    if (!reimbursement) {
+      return res.status(404).json({ detail: 'Reimbursement not found' });
+    }
+
+    // Check permission - only owner can edit, admin can edit any
+    if (req.user.role !== UserRole.ADMIN && reimbursement.employee_email !== req.user.email) {
+      return res.status(403).json({ detail: 'Not authorized to edit this reimbursement' });
+    }
+
+    // Can only edit pending reimbursements (unless admin)
+    if (req.user.role !== UserRole.ADMIN && reimbursement.status !== 'pending') {
+      return res.status(400).json({ detail: 'Can only edit pending reimbursements' });
+    }
+
+    // Build update object
+    const updateData = {
+      updated_at: toISOString(new Date())
+    };
+
+    if (title !== undefined && title.trim()) {
+      updateData.title = title.trim();
+    }
+
+    if (category !== undefined && category.trim()) {
+      updateData.category = category.trim();
+    }
+
+    if (amount !== undefined) {
+      const parsedAmount = parseFloat(amount);
+      if (isNaN(parsedAmount) || parsedAmount <= 0) {
+        return res.status(400).json({ detail: 'Invalid amount' });
+      }
+      updateData.amount = parsedAmount;
+    }
+
+    if (description !== undefined) {
+      updateData.description = description;
+    }
+
+    if (expense_date !== undefined) {
+      updateData.expense_date = expense_date;
+    }
+
+    // Handle bill image
+    // If remove_bill is true, delete the existing bill
+    if (remove_bill === 'true' || remove_bill === true) {
+      if (reimbursement.bill_key) {
+        try {
+          await deleteFile(reimbursement.bill_key);
+        } catch (deleteError) {
+          console.error('Failed to delete old bill from S3:', deleteError);
+        }
+      } else if (reimbursement.bill_url) {
+        const key = extractKeyFromUrl(reimbursement.bill_url);
+        if (key) {
+          try {
+            await deleteFile(key);
+          } catch (deleteError) {
+            console.error('Failed to delete old bill from S3:', deleteError);
+          }
+        }
+      }
+      updateData.bill_url = null;
+      updateData.bill_key = null;
+    }
+
+    // If new image is uploaded, replace the old one
+    if (req.file) {
+      // Delete old bill if exists
+      if (reimbursement.bill_key) {
+        try {
+          await deleteFile(reimbursement.bill_key);
+        } catch (deleteError) {
+          console.error('Failed to delete old bill from S3:', deleteError);
+        }
+      } else if (reimbursement.bill_url) {
+        const key = extractKeyFromUrl(reimbursement.bill_url);
+        if (key) {
+          try {
+            await deleteFile(key);
+          } catch (deleteError) {
+            console.error('Failed to delete old bill from S3:', deleteError);
+          }
+        }
+      }
+
+      // Upload new bill
+      try {
+        const uploadResult = await uploadFile(
+          req.file.buffer,
+          req.file.originalname,
+          req.file.mimetype,
+          'reimbursements',
+          reimbursement.employee_id
+        );
+        updateData.bill_url = uploadResult.url;
+        updateData.bill_key = uploadResult.key;
+        console.log('New bill uploaded successfully:', uploadResult.url);
+      } catch (uploadError) {
+        console.error('Failed to upload new bill image:', uploadError);
+        // Continue without updating the image
+      }
+    }
+
+    // Update the reimbursement
+    await db.collection('reimbursements').updateOne(
+      { id },
+      { $set: updateData }
+    );
+
+    // Get updated reimbursement
+    const updatedReimbursement = await db.collection('reimbursements').findOne(
+      { id },
+      { projection: { _id: 0 } }
+    );
+
+    res.json({
+      status: 'success',
+      message: 'Reimbursement updated successfully',
+      reimbursement: updatedReimbursement
+    });
+  } catch (error) {
+    console.error('Edit reimbursement error:', error);
+    res.status(500).json({ detail: 'Internal server error' });
+  }
+});
+
+/**
  * GET /api/reimbursements/my
  * Get my reimbursements (employee/manager)
  */
