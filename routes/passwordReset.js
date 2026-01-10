@@ -226,7 +226,7 @@ router.post('/reset', async (req, res) => {
       const confirmationHtml = `
         <div style="font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; max-width: 600px; margin: 0 auto; padding: 20px;">
           <div style="background: linear-gradient(135deg, #1e293b 0%, #334155 100%); padding: 30px; border-radius: 12px 12px 0 0;">
-            <h1 style="color: #ffffff; margin: 0; font-size: 24px;">Password Changed Successfully</h1>
+            <h1 style="color: #020202; margin: 0; font-size: 24px;">Password Changed Successfully</h1>
           </div>
           <div style="background: #ffffff; padding: 30px; border: 1px solid #e2e8f0; border-top: none; border-radius: 0 0 12px 12px;">
             <p style="color: #334155; font-size: 16px; line-height: 1.6;">

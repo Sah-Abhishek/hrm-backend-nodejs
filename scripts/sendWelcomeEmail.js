@@ -6,6 +6,8 @@
  * Usage:
  *   node scripts/sendWelcomeEmail.js EMP0009
  *   node scripts/sendWelcomeEmail.js EMP0005 --dry-run
+ *   node scripts/sendWelcomeEmail.js --all
+ *   node scripts/sendWelcomeEmail.js --all --dry-run
  */
 
 require('dotenv').config();
@@ -21,8 +23,9 @@ const FRONTEND_URL = process.env.FRONTEND_URL || 'http://localhost:5173';
 const args = process.argv.slice(2);
 const employeeId = args.find(arg => !arg.startsWith('--'));
 const dryRun = args.includes('--dry-run');
+const sendToAll = args.includes('--all');
 
-if (!employeeId) {
+if (!employeeId && !sendToAll) {
   console.log(`
 ╔════════════════════════════════════════════════════════════╗
 ║         Welcome Email Sender (New Employee Onboarding)     ║
@@ -30,16 +33,20 @@ if (!employeeId) {
 
 Usage:
   node sendWelcomeEmail.js <EMPLOYEE_ID> [options]
+  node sendWelcomeEmail.js --all [options]
 
 Arguments:
   EMPLOYEE_ID    The employee ID (e.g., EMP0009, EMP0005)
 
 Options:
+  --all          Send welcome email to ALL employees
   --dry-run      Preview without sending email
 
 Examples:
   node sendWelcomeEmail.js EMP0009
   node sendWelcomeEmail.js EMP0005 --dry-run
+  node sendWelcomeEmail.js --all
+  node sendWelcomeEmail.js --all --dry-run
   `);
   process.exit(1);
 }
@@ -70,7 +77,7 @@ function generateWelcomeEmailWithPasswordSetup(employee, resetUrl, expiryHours) 
         <!-- Header -->
         <div style="background: linear-gradient(135deg, #1e293b 0%, #334155 100%); padding: 50px 30px; border-radius: 16px 16px 0 0; text-align: center;">
           <div style="font-size: 48px; margin-bottom: 15px;">🎉</div>
-          <h1 style="color: #334155; margin: 0; font-size: 28px; font-weight: 700;">Welcome to ${organization_name || 'Our Organization'}!</h1>
+          <h1 style="color: #ffffff; margin: 0; font-size: 28px; font-weight: 700;">Welcome to ${organization_name || 'Our Organization'}!</h1>
           <p style="color: #94a3b8; margin: 15px 0 0; font-size: 16px;">We're excited to have you on board</p>
         </div>
         
@@ -217,6 +224,83 @@ async function sendEmail(toEmail, subject, htmlContent) {
 }
 
 /**
+ * Process a single employee - generate token and send email
+ */
+async function processEmployee(db, employee, dryRun) {
+  const result = {
+    employee_id: employee.employee_id,
+    email: employee.email,
+    full_name: employee.full_name,
+    success: false,
+    error: null
+  };
+
+  try {
+    if (dryRun) {
+      const previewToken = 'preview-token-xxxxx';
+      const previewUrl = `${FRONTEND_URL}/reset-password?token=${previewToken}`;
+
+      console.log(`   📧 ${employee.employee_id} - ${employee.full_name} <${employee.email}>`);
+      console.log(`      Reset URL: ${previewUrl}`);
+
+      result.success = true;
+      return result;
+    }
+
+    // Generate reset token
+    const resetToken = generateResetToken();
+    const expiresAt = new Date(Date.now() + TOKEN_EXPIRY_HOURS * 60 * 60 * 1000);
+
+    // Invalidate existing tokens
+    await db.collection('password_reset_tokens').updateMany(
+      { email: employee.email, used: false },
+      { $set: { used: true, invalidated_at: new Date() } }
+    );
+
+    // Store new token
+    await db.collection('password_reset_tokens').insertOne({
+      token: resetToken,
+      email: employee.email,
+      employee_id: employee.employee_id,
+      full_name: employee.full_name,
+      created_at: new Date(),
+      expires_at: expiresAt,
+      used: false,
+      triggered_by: 'welcome_email_script',
+      type: 'welcome'
+    });
+
+    // Generate reset URL and email
+    const resetUrl = `${FRONTEND_URL}/reset-password?token=${resetToken}`;
+    const emailHtml = generateWelcomeEmailWithPasswordSetup(employee, resetUrl, TOKEN_EXPIRY_HOURS);
+    const subject = `Welcome to ${employee.organization_name || 'Our Organization'}! Set Up Your Password`;
+
+    // Send email
+    await sendEmail(employee.email, subject, emailHtml);
+
+    // Log the action
+    await db.collection('password_reset_logs').insertOne({
+      email: employee.email,
+      employee_id: employee.employee_id,
+      action: 'welcome_email_sent',
+      triggered_by: 'welcome_email_script',
+      email_sent: true,
+      timestamp: new Date()
+    });
+
+    console.log(`   ✅ ${employee.employee_id} - ${employee.full_name} <${employee.email}>`);
+    result.success = true;
+
+  } catch (error) {
+    console.log(`   ❌ ${employee.employee_id} - ${employee.full_name} <${employee.email}>`);
+    console.log(`      Error: ${error.message}`);
+    result.error = error.message;
+  }
+
+  return result;
+}
+
+/**
  * Main function
  */
 async function main() {
@@ -227,10 +311,14 @@ async function main() {
 `);
 
   if (dryRun) {
-    console.log('🔍 DRY RUN MODE - No email will be sent\n');
+    console.log('🔍 DRY RUN MODE - No emails will be sent\n');
   }
 
-  console.log(`🔎 Looking for employee: ${employeeId}\n`);
+  if (sendToAll) {
+    console.log('📨 Mode: Send to ALL employees\n');
+  } else {
+    console.log(`🔎 Looking for employee: ${employeeId}\n`);
+  }
 
   // Connect to MongoDB
   const mongoUrl = process.env.MONGO_URL;
@@ -254,122 +342,116 @@ async function main() {
   const db = client.db(dbName);
 
   try {
-    // Find employee by employee_id
-    const employee = await db.collection('employees').findOne(
-      { employee_id: employeeId.toUpperCase() },
-      { projection: { full_name: 1, email: 1, employee_id: 1, department: 1, designation: 1, organization_name: 1 } }
-    );
+    let employees = [];
 
-    if (!employee) {
-      console.error(`❌ Employee not found: ${employeeId}`);
-      console.log('\n💡 Tip: Make sure you\'re using the correct Employee ID (e.g., EMP0009)\n');
-
-      // Show available employees
-      const allEmployees = await db.collection('employees')
-        .find({}, { projection: { employee_id: 1, full_name: 1, email: 1 } })
-        .limit(10)
+    if (sendToAll) {
+      // Fetch all employees
+      employees = await db.collection('employees')
+        .find({}, { projection: { full_name: 1, email: 1, employee_id: 1, department: 1, designation: 1, organization_name: 1 } })
         .toArray();
 
-      if (allEmployees.length > 0) {
-        console.log('📋 Available employees:');
-        allEmployees.forEach(emp => {
-          console.log(`   ${emp.employee_id} - ${emp.full_name} <${emp.email}>`);
-        });
-        console.log('');
+      if (employees.length === 0) {
+        console.error('❌ No employees found in the database');
+        process.exit(1);
       }
 
-      process.exit(1);
+      console.log(`📋 Found ${employees.length} employee(s)\n`);
+      console.log('┌─────────────────────────────────────────────────────────');
+      console.log('│ Employees to process:');
+      console.log('├─────────────────────────────────────────────────────────');
+      employees.forEach((emp, idx) => {
+        console.log(`│ ${idx + 1}. ${emp.employee_id} - ${emp.full_name} <${emp.email}>`);
+      });
+      console.log('└─────────────────────────────────────────────────────────\n');
+
+    } else {
+      // Find single employee by employee_id
+      const employee = await db.collection('employees').findOne(
+        { employee_id: employeeId.toUpperCase() },
+        { projection: { full_name: 1, email: 1, employee_id: 1, department: 1, designation: 1, organization_name: 1 } }
+      );
+
+      if (!employee) {
+        console.error(`❌ Employee not found: ${employeeId}`);
+        console.log('\n💡 Tip: Make sure you\'re using the correct Employee ID (e.g., EMP0009)\n');
+
+        // Show available employees
+        const allEmployees = await db.collection('employees')
+          .find({}, { projection: { employee_id: 1, full_name: 1, email: 1 } })
+          .limit(10)
+          .toArray();
+
+        if (allEmployees.length > 0) {
+          console.log('📋 Available employees:');
+          allEmployees.forEach(emp => {
+            console.log(`   ${emp.employee_id} - ${emp.full_name} <${emp.email}>`);
+          });
+          console.log('');
+        }
+
+        process.exit(1);
+      }
+
+      employees = [employee];
+
+      // Display employee info
+      console.log('┌─────────────────────────────────────────────────────────');
+      console.log('│ 🎉 Employee Found');
+      console.log('├─────────────────────────────────────────────────────────');
+      console.log(`│ ID:           ${employee.employee_id}`);
+      console.log(`│ Name:         ${employee.full_name}`);
+      console.log(`│ Email:        ${employee.email}`);
+      console.log(`│ Department:   ${employee.department || 'N/A'}`);
+      console.log(`│ Designation:  ${employee.designation || 'N/A'}`);
+      console.log(`│ Organization: ${employee.organization_name || 'N/A'}`);
+      console.log('└─────────────────────────────────────────────────────────\n');
     }
 
-    // Display employee info
-    console.log('┌─────────────────────────────────────────────────────────');
-    console.log('│ 🎉 New Employee Found');
-    console.log('├─────────────────────────────────────────────────────────');
-    console.log(`│ ID:           ${employee.employee_id}`);
-    console.log(`│ Name:         ${employee.full_name}`);
-    console.log(`│ Email:        ${employee.email}`);
-    console.log(`│ Department:   ${employee.department || 'N/A'}`);
-    console.log(`│ Designation:  ${employee.designation || 'N/A'}`);
-    console.log(`│ Organization: ${employee.organization_name || 'N/A'}`);
-    console.log('└─────────────────────────────────────────────────────────\n');
+    // Process employees
+    console.log(dryRun ? '📧 Preview of emails to be sent:\n' : '📤 Sending welcome emails...\n');
+
+    const results = [];
+    for (const employee of employees) {
+      const result = await processEmployee(db, employee, dryRun);
+      results.push(result);
+
+      // Add a small delay between emails to avoid rate limiting (only when actually sending)
+      if (!dryRun && employees.length > 1) {
+        await new Promise(resolve => setTimeout(resolve, 500));
+      }
+    }
+
+    // Summary
+    const successful = results.filter(r => r.success);
+    const failed = results.filter(r => !r.success);
+
+    console.log('\n╔════════════════════════════════════════════════════════════╗');
+    if (dryRun) {
+      console.log('║                    📋 DRY RUN SUMMARY                      ║');
+    } else {
+      console.log('║                    📊 SENDING SUMMARY                      ║');
+    }
+    console.log('╠════════════════════════════════════════════════════════════╣');
+    console.log(`║ Total Employees:    ${employees.length.toString().padEnd(36)}║`);
+    console.log(`║ ✅ Successful:      ${successful.length.toString().padEnd(36)}║`);
+    console.log(`║ ❌ Failed:          ${failed.length.toString().padEnd(36)}║`);
+    console.log('╚════════════════════════════════════════════════════════════╝\n');
+
+    if (failed.length > 0) {
+      console.log('❌ Failed employees:');
+      failed.forEach(f => {
+        console.log(`   ${f.employee_id} - ${f.email}: ${f.error}`);
+      });
+      console.log('');
+    }
 
     if (dryRun) {
-      // Generate preview URL
-      const previewToken = 'preview-token-xxxxx';
-      const previewUrl = `${FRONTEND_URL}/reset-password?token=${previewToken}`;
-
-      console.log('📧 Welcome Email Preview:');
-      console.log('─────────────────────────────────────────────────────────');
-      console.log(`To:      ${employee.email}`);
-      console.log(`Subject: Welcome to ${employee.organization_name || 'Our Organization'}! Set Up Your Password`);
-      console.log(`Reset URL: ${previewUrl}`);
-      console.log(`Expires in: ${TOKEN_EXPIRY_HOURS} hours`);
-      console.log('─────────────────────────────────────────────────────────\n');
-      console.log('🔍 Dry run complete. No email was sent.\n');
-      return;
+      console.log('🔍 Dry run complete. No emails were sent.');
+      console.log('💡 Remove --dry-run flag to send actual emails.\n');
+    } else if (successful.length > 0) {
+      console.log('💡 Employees can click the link in their email to set their password.');
+      console.log('⏰ Links will expire in 24 hours.\n');
     }
-
-    // Generate reset token
-    const resetToken = generateResetToken();
-    const expiresAt = new Date(Date.now() + TOKEN_EXPIRY_HOURS * 60 * 60 * 1000);
-
-    // Invalidate existing tokens
-    const invalidated = await db.collection('password_reset_tokens').updateMany(
-      { email: employee.email, used: false },
-      { $set: { used: true, invalidated_at: new Date() } }
-    );
-
-    if (invalidated.modifiedCount > 0) {
-      console.log(`⚠️  Invalidated ${invalidated.modifiedCount} existing token(s)\n`);
-    }
-
-    // Store new token
-    await db.collection('password_reset_tokens').insertOne({
-      token: resetToken,
-      email: employee.email,
-      employee_id: employee.employee_id,
-      full_name: employee.full_name,
-      created_at: new Date(),
-      expires_at: expiresAt,
-      used: false,
-      triggered_by: 'welcome_email_script',
-      type: 'welcome'
-    });
-
-    console.log('✅ Password setup token generated');
-    console.log(`   Expires: ${expiresAt.toLocaleString()}\n`);
-
-    // Generate reset URL and email
-    const resetUrl = `${FRONTEND_URL}/reset-password?token=${resetToken}`;
-    const emailHtml = generateWelcomeEmailWithPasswordSetup(employee, resetUrl, TOKEN_EXPIRY_HOURS);
-    const subject = `Welcome to ${employee.organization_name || 'Our Organization'}! Set Up Your Password`;
-
-    console.log('📤 Sending welcome email...\n');
-
-    // Send email
-    await sendEmail(employee.email, subject, emailHtml);
-
-    // Log the action
-    await db.collection('password_reset_logs').insertOne({
-      email: employee.email,
-      employee_id: employee.employee_id,
-      action: 'welcome_email_sent',
-      triggered_by: 'welcome_email_script',
-      email_sent: true,
-      timestamp: new Date()
-    });
-
-    console.log('╔════════════════════════════════════════════════════════════╗');
-    console.log('║              🎉 WELCOME EMAIL SENT!                        ║');
-    console.log('╠════════════════════════════════════════════════════════════╣');
-    console.log(`║ To:      ${employee.email.padEnd(47)}║`);
-    console.log(`║ Name:    ${employee.full_name.padEnd(47)}║`);
-    console.log('╠════════════════════════════════════════════════════════════╣');
-    console.log('║ Password Setup URL (for testing):                          ║');
-    console.log('╚════════════════════════════════════════════════════════════╝');
-    console.log(`\n🔗 ${resetUrl}\n`);
-    console.log('💡 The new employee can click the link in their email to set their password.\n');
-    console.log('⏰ This link will expire in 24 hours.\n');
 
   } finally {
     await client.close();

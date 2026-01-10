@@ -481,7 +481,7 @@ const generatePasswordResetEmail = (fullName, resetUrl, expiryHours = 24) => {
       <div style="max-width: 600px; margin: 0 auto; padding: 40px 20px;">
         <!-- Header -->
         <div style="background: linear-gradient(135deg, #1e293b 0%, #334155 100%); padding: 40px 30px; border-radius: 16px 16px 0 0; text-align: center;">
-          <h1 style="color: #ffffff; margin: 0; font-size: 28px; font-weight: 700;">HRMS</h1>
+          <h1 style="color: #020202; margin: 0; font-size: 28px; font-weight: 700;">HRMS</h1>
           <p style="color: #94a3b8; margin: 10px 0 0; font-size: 14px;">Password Reset Request</p>
         </div>
         
@@ -499,7 +499,7 @@ const generatePasswordResetEmail = (fullName, resetUrl, expiryHours = 24) => {
           <div style="text-align: center; margin: 30px 0;">
             <a href="${resetUrl}" 
                style="display: inline-block; background: linear-gradient(135deg, #1e293b 0%, #334155 100%); 
-                      color: #ffffff; text-decoration: none; padding: 16px 40px; border-radius: 50px; 
+                      color: #020202; text-decoration: none; padding: 16px 40px; border-radius: 50px; 
                       font-size: 16px; font-weight: 600; box-shadow: 0 4px 14px rgba(30, 41, 59, 0.3);">
               Reset My Password
             </a>
