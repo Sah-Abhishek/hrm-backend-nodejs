@@ -17,10 +17,19 @@ const { isSetupCompleted, markSetupCompleted, ROOT_DIR } = require('../config/co
  * GET /api/setup/status
  * Check if setup is completed
  */
+// router.get('/status', (req, res) => {
+//   res.json({
+//     setup_completed: isSetupCompleted(),
+//     timestamp: new Date().toISOString()
+//   });
+// });
+
+
 router.get('/status', (req, res) => {
   res.json({
-    setup_completed: isSetupCompleted(),
-    timestamp: new Date().toISOString()
+    setup_completed: true,
+    timestamp: new Date().toISOString(),
+    bypassed: true
   });
 });
 
