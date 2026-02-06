@@ -29,6 +29,8 @@ const reimbursementRoutes = require('./routes/Reimbursements');
 const compOffRoutes = require('./routes/compoffRoutes');
 const leaveCreditRoutes = require('./routes/leaveCredit');
 const userNotificationRoutes = require('./routes/userNotifications');
+const whatsappRoutes = require('./routes/whatsapp');
+const baileysService = require('./services/baileysService');
 
 
 
@@ -129,6 +131,7 @@ app.use('/api/reimbursements', reimbursementRoutes);
 app.use('/api/comp-off', compOffRoutes);
 app.use('/api/admin/leave-credit', leaveCreditRoutes);
 app.use('/api/notifications', userNotificationRoutes);
+app.use('/api/whatsapp', whatsappRoutes);
 
 
 
@@ -181,12 +184,14 @@ async function startServer() {
 // Graceful shutdown
 process.on('SIGINT', async () => {
   console.log('\n[SERVER] Shutting down...');
+  await baileysService.disconnect(false);
   await closeDB();
   process.exit(0);
 });
 
 process.on('SIGTERM', async () => {
   console.log('\n[SERVER] Shutting down...');
+  await baileysService.disconnect(false);
   await closeDB();
   process.exit(0);
 });

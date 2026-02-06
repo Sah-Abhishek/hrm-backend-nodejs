@@ -6,7 +6,6 @@ const { requireRole, validate } = require('../middleware/roleCheck');
 const { schemas, UserRole, LeaveStatus, LeaveType, defaultLeavePolicy } = require('../models/schemas');
 const { generateUUID, normalizeLeaveType, toISOString } = require('../utils/helpers');
 const { sendEmailNotification } = require('../services/emailService');
-const { sendWhatsAppNotification } = require('../services/whatsappService');
 const { generateLeaveApplicationEmail, generateLeaveApprovalEmail, generateLeaveEditEmail } = require('../utils/emailTemplates');
 const { createNotification, NotificationType } = require('../services/notificationService');
 
@@ -698,8 +697,6 @@ router.post('/', authenticate, getCurrentEmployee, validate(schemas.leaveApplica
         leaveData.reason
       );
 
-      const whatsappMsg = `New leave application from ${employee.full_name}\nType: ${leaveData.leave_type}\nDates: ${datesDisplay}\nDays: ${daysCount}\nReason: ${leaveData.reason}`;
-
       const manager = await db.collection('employees').findOne(
         { department: employee.department, role: 'manager' },
         { projection: { id: 1, email: 1, phone: 1 } }
@@ -711,10 +708,6 @@ router.post('/', authenticate, getCurrentEmployee, validate(schemas.leaveApplica
           `Leave Application from ${employee.full_name}`,
           emailHtml
         );
-
-        if (manager.phone) {
-          await sendWhatsAppNotification(manager.phone, whatsappMsg);
-        }
 
         // Create in-app notification for manager
         await createNotification({
@@ -739,10 +732,6 @@ router.post('/', authenticate, getCurrentEmployee, validate(schemas.leaveApplica
           `Leave Application from ${employee.full_name}`,
           emailHtml
         );
-
-        if (admin.phone) {
-          await sendWhatsAppNotification(admin.phone, whatsappMsg);
-        }
 
         // Create in-app notification for admin
         await createNotification({
@@ -1206,11 +1195,6 @@ router.put('/:leaveId/action', authenticate, getCurrentEmployee, validate(schema
           `Leave ${statusText.charAt(0).toUpperCase() + statusText.slice(1)} - ${leaveDoc.leave_type}`,
           emailHtml
         );
-
-        if (employeeRecord?.phone) {
-          const whatsappMsg = `Your leave application has been ${statusText.toUpperCase()}!\n\nType: ${leaveDoc.leave_type}\nDates: ${datesDisplay}`;
-          await sendWhatsAppNotification(employeeRecord.phone, whatsappMsg);
-        }
 
         // Create in-app notification for employee
         const isApproved = newStatus === LeaveStatus.APPROVED;

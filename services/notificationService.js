@@ -5,6 +5,7 @@
 
 const { getDB } = require('../config/database');
 const { sendEmailNotification } = require('./emailService');
+const { sendWhatsAppNotification, shouldSendWhatsApp } = require('./whatsappService');
 const { v4: uuidv4 } = require('uuid');
 
 // Notification Types
@@ -31,6 +32,29 @@ const NotificationType = {
 
   // General
   GENERAL: 'general'
+};
+
+/**
+ * Try to send WhatsApp notification for a given type
+ * Checks settings, looks up employee phone, sends if enabled
+ */
+const trySendWhatsApp = async (type, userEmail, message) => {
+  try {
+    const enabled = await shouldSendWhatsApp(type);
+    if (!enabled) return;
+
+    const db = getDB();
+    const employee = await db.collection('employees').findOne(
+      { email: userEmail },
+      { projection: { phone: 1 } }
+    );
+
+    if (employee?.phone) {
+      await sendWhatsAppNotification(employee.phone, message);
+    }
+  } catch (error) {
+    console.error('trySendWhatsApp error:', error.message);
+  }
 };
 
 /**
@@ -73,6 +97,12 @@ const createNotification = async ({
     await db.collection('notifications').insertOne(notification);
 
     console.log(`🔔 Notification created for ${userEmail}: ${title}`);
+
+    // Fire-and-forget WhatsApp notification
+    trySendWhatsApp(type, userEmail, message).catch(err =>
+      console.error('WhatsApp send error (non-blocking):', err.message)
+    );
+
     return notification;
   } catch (error) {
     console.error('Failed to create notification:', error.message);

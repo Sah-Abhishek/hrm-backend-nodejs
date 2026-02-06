@@ -234,7 +234,9 @@ const schemas = {
     from_name: Joi.string().default('HRMS System'),
     twilio_account_sid: Joi.string().allow(null, ''),
     twilio_auth_token: Joi.string().allow(null, ''),
-    twilio_phone_number: Joi.string().allow(null, '')
+    twilio_phone_number: Joi.string().allow(null, ''),
+    whatsapp_provider: Joi.string().valid('twilio', 'baileys').default('twilio'),
+    whatsapp_notification_types: Joi.array().items(Joi.string()).default([])
   }),
 
   // Setup

@@ -31,6 +31,8 @@ router.post('/notification-settings', authenticate, requireRole([UserRole.ADMIN]
       twilio_account_sid: settings.twilio_account_sid || null,
       twilio_auth_token: settings.twilio_auth_token || null,
       twilio_phone_number: settings.twilio_phone_number || null,
+      whatsapp_provider: settings.whatsapp_provider || 'twilio',
+      whatsapp_notification_types: settings.whatsapp_notification_types || [],
       updated_at: new Date().toISOString(),
       updated_by: req.user.email
     };
@@ -74,7 +76,9 @@ router.get('/notification-settings', authenticate, requireRole([UserRole.ADMIN, 
         from_name: 'HRMS System',
         twilio_account_sid: null,
         twilio_auth_token: null,
-        twilio_phone_number: null
+        twilio_phone_number: null,
+        whatsapp_provider: 'twilio',
+        whatsapp_notification_types: []
       });
     }
 
@@ -129,11 +133,24 @@ router.post('/notification-settings/test-email', authenticate, requireRole([User
 router.post('/notification-settings/test-whatsapp', authenticate, requireRole([UserRole.ADMIN]), async (req, res) => {
   try {
     const { to_phone } = req.body;
-    const { sendWhatsAppNotification } = require('../services/whatsappService');
+
+    const db = getDB();
+    const settings = await db.collection('notification_settings').findOne({});
+    const provider = settings?.whatsapp_provider || 'twilio';
 
     const testMessage = 'This is a test message from HRMS. If you received this, your WhatsApp configuration is working correctly!';
 
-    const success = await sendWhatsAppNotification(to_phone, testMessage);
+    let success;
+    if (provider === 'baileys') {
+      const baileysService = require('../services/baileysService');
+      if (!baileysService.isConnected()) {
+        return res.status(400).json({ detail: 'WhatsApp (Baileys) is not connected. Please connect first.' });
+      }
+      success = await baileysService.sendMessage(to_phone, testMessage);
+    } else {
+      const { sendWhatsAppNotification } = require('../services/whatsappService');
+      success = await sendWhatsAppNotification(to_phone, testMessage);
+    }
 
     if (success) {
       res.json({ status: 'success', message: 'Test WhatsApp message sent successfully' });
