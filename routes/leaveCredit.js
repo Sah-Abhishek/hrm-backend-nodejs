@@ -14,6 +14,7 @@ const { requireRole } = require('../middleware/roleCheck');
 const { UserRole } = require('../models/schemas');
 const { creditMonthlyLeaves, LEAVE_CREDIT_RULES, initializeLeaveBalance } = require('../cron/monthlyLeaveCredit');
 const { normalizeLeaveType } = require('../utils/helpers');
+const { createNotification, NotificationType } = require('../services/notificationService');
 
 /**
  * GET /api/admin/leave-credit/rules
@@ -231,6 +232,41 @@ router.post('/leave-balance/update/:employeeId', authenticate, requireRole([User
       reason,
       performed_by: req.user.email,
       created_at: new Date()
+    });
+
+    // Create in-app notification for employee
+    let actionText;
+    switch (action_type) {
+      case 'add':
+        actionText = `increased by ${days} day(s)`;
+        break;
+      case 'deduct':
+        actionText = `decreased by ${days} day(s)`;
+        break;
+      case 'set':
+        actionText = `set to ${newBalance} day(s)`;
+        break;
+      default:
+        actionText = 'adjusted';
+    }
+
+    const leaveTypeDisplay = leaveKey.replace('_', ' ').replace(/\b\w/g, l => l.toUpperCase());
+
+    await createNotification({
+      userId: employee.id,
+      userEmail: employee.email,
+      type: NotificationType.LEAVE_BALANCE_ADJUSTED,
+      title: 'Leave Balance Updated',
+      message: `Your ${leaveTypeDisplay} balance has been ${actionText} by admin. Previous: ${currentBalance}, New: ${newBalance}${reason ? `. Reason: ${reason}` : ''}`,
+      actionUrl: '/leaves',
+      metadata: {
+        leave_type: leaveKey,
+        action_type,
+        previous_balance: currentBalance,
+        new_balance: newBalance,
+        reason,
+        adjusted_by: req.user.email
+      }
     });
 
     // Get updated leave balance

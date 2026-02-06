@@ -6,6 +6,7 @@ const { requireRole } = require('../middleware/roleCheck');
 const { UserRole } = require('../models/schemas');
 const { generateUUID, toISOString } = require('../utils/helpers');
 const { sendEmailNotification } = require('../services/emailService');
+const { createNotification, NotificationType } = require('../services/notificationService');
 
 /**
  * Helper function to update employee's comp_off balance
@@ -165,6 +166,25 @@ router.post('/request', authenticate, requireRole([UserRole.EMPLOYEE, UserRole.M
         `Comp-Off Request from ${employee.full_name}`,
         emailHtml
       );
+
+      // Create in-app notification for approver
+      const approver = await db.collection('employees').findOne(
+        { email: approverEmail },
+        { projection: { id: 1 } }
+      );
+
+      if (approver) {
+        const formattedDate = new Date(work_date).toLocaleDateString('en-IN', { day: 'numeric', month: 'short', year: 'numeric' });
+        await createNotification({
+          userId: approver.id,
+          userEmail: approverEmail,
+          type: NotificationType.COMPOFF_APPLIED,
+          title: 'New Comp-Off Request',
+          message: `${employee.full_name} has requested ${parsedDays} day(s) comp-off for work on ${formattedDate}`,
+          actionUrl: req.user.role === UserRole.MANAGER ? '/compoffapproval' : '/admincompoff',
+          metadata: { compoff_id: compOffRequest.id, employee_name: employee.full_name }
+        });
+      }
     }
 
     delete compOffRequest._id;
@@ -353,6 +373,27 @@ router.post('/:id/action', authenticate, requireRole([UserRole.MANAGER, UserRole
       action === 'approve' ? 'Comp-Off Request Approved!' : 'Comp-Off Request Rejected',
       emailHtml
     );
+
+    // Create in-app notification for employee
+    const employeeRecord = await db.collection('employees').findOne(
+      { email: compOffRequest.employee_email },
+      { projection: { id: 1 } }
+    );
+
+    const formattedDate = new Date(compOffRequest.work_date).toLocaleDateString('en-IN', { day: 'numeric', month: 'short', year: 'numeric' });
+    const isApproved = action === 'approve';
+
+    await createNotification({
+      userId: employeeRecord?.id,
+      userEmail: compOffRequest.employee_email,
+      type: isApproved ? NotificationType.COMPOFF_APPROVED : NotificationType.COMPOFF_REJECTED,
+      title: isApproved ? 'Comp-Off Approved' : 'Comp-Off Rejected',
+      message: isApproved
+        ? `Your comp-off request for ${compOffRequest.days} day(s) (work on ${formattedDate}) has been approved. Days added to your balance.`
+        : `Your comp-off request for ${compOffRequest.days} day(s) has been rejected${remarks ? `. Reason: ${remarks}` : ''}`,
+      actionUrl: '/mycompoff',
+      metadata: { compoff_id: id, action_by: req.user.email }
+    });
 
     res.json({
       status: 'success',
@@ -565,6 +606,18 @@ router.post('/grant', authenticate, requireRole([UserRole.MANAGER, UserRole.ADMI
       'Comp-Off Granted!',
       emailHtml
     );
+
+    // Create in-app notification for employee
+    const formattedDate = new Date(work_date).toLocaleDateString('en-IN', { day: 'numeric', month: 'short', year: 'numeric' });
+    await createNotification({
+      userId: employee.id,
+      userEmail: employee.email,
+      type: NotificationType.COMPOFF_APPROVED,
+      title: 'Comp-Off Granted',
+      message: `You have been granted ${parsedDays} day(s) comp-off for work on ${formattedDate}. Days added to your balance.`,
+      actionUrl: '/mycompoff',
+      metadata: { compoff_id: compOffRecord.id, granted_by: req.user.email }
+    });
 
     delete compOffRecord._id;
 

@@ -28,6 +28,7 @@ const attendanceRouter = require('./routes/attendance');
 const reimbursementRoutes = require('./routes/Reimbursements');
 const compOffRoutes = require('./routes/compoffRoutes');
 const leaveCreditRoutes = require('./routes/leaveCredit');
+const userNotificationRoutes = require('./routes/userNotifications');
 
 
 
@@ -127,6 +128,7 @@ app.use('/api/attendance', attendanceRouter);
 app.use('/api/reimbursements', reimbursementRoutes);
 app.use('/api/comp-off', compOffRoutes);
 app.use('/api/admin/leave-credit', leaveCreditRoutes);
+app.use('/api/notifications', userNotificationRoutes);
 
 
 

@@ -8,6 +8,7 @@ const { UserRole } = require('../models/schemas');
 const { generateUUID, toISOString } = require('../utils/helpers');
 const { sendEmailNotification } = require('../services/emailService');
 const { uploadFile, deleteFile, extractKeyFromUrl } = require('../services/s3Service');
+const { createNotification, NotificationType } = require('../services/notificationService');
 
 // Configure multer for memory storage
 const upload = multer({
@@ -99,6 +100,27 @@ router.post('/apply', authenticate, requireRole([UserRole.EMPLOYEE, UserRole.MAN
     };
 
     await db.collection('reimbursements').insertOne(reimbursement);
+
+    // Notify admins about new reimbursement request
+    try {
+      const admins = await db.collection('employees')
+        .find({ role: 'admin' }, { projection: { id: 1, email: 1 } })
+        .toArray();
+
+      for (const admin of admins) {
+        await createNotification({
+          userId: admin.id,
+          userEmail: admin.email,
+          type: NotificationType.REIMBURSEMENT_APPLIED,
+          title: 'New Reimbursement Request',
+          message: `${employee.full_name} has submitted a reimbursement request for ₹${parsedAmount} (${category})`,
+          actionUrl: '/adminreimbursements',
+          metadata: { reimbursement_id: reimbursement.id, employee_name: employee.full_name, amount: parsedAmount }
+        });
+      }
+    } catch (notifyError) {
+      console.error('Failed to send reimbursement notification:', notifyError.message);
+    }
 
     delete reimbursement._id;
 
@@ -428,6 +450,12 @@ router.post('/:id/action', authenticate, requireRole([UserRole.ADMIN]), async (r
       { $set: updateData }
     );
 
+    // Get employee record for notifications
+    const employeeRecord = await db.collection('employees').findOne(
+      { email: reimbursement.employee_email },
+      { projection: { id: 1 } }
+    );
+
     // Send email notification for cleared reimbursements
     if (action === 'clear') {
       const emailHtml = generateReimbursementClearedEmail({
@@ -445,6 +473,17 @@ router.post('/:id/action', authenticate, requireRole([UserRole.ADMIN]), async (r
         'Reimbursement Cleared - Payment Processed',
         emailHtml
       );
+
+      // Create in-app notification
+      await createNotification({
+        userId: employeeRecord?.id,
+        userEmail: reimbursement.employee_email,
+        type: NotificationType.REIMBURSEMENT_CLEARED,
+        title: 'Reimbursement Cleared',
+        message: `Your reimbursement of ₹${reimbursement.amount} (${reimbursement.title}) has been cleared/paid`,
+        actionUrl: '/myreimbursements',
+        metadata: { reimbursement_id: id, amount: reimbursement.amount }
+      });
     }
 
     // Send email for rejection
@@ -462,6 +501,30 @@ router.post('/:id/action', authenticate, requireRole([UserRole.ADMIN]), async (r
         'Reimbursement Request Rejected',
         emailHtml
       );
+
+      // Create in-app notification
+      await createNotification({
+        userId: employeeRecord?.id,
+        userEmail: reimbursement.employee_email,
+        type: NotificationType.REIMBURSEMENT_REJECTED,
+        title: 'Reimbursement Rejected',
+        message: `Your reimbursement request for ₹${reimbursement.amount} (${reimbursement.title}) has been rejected${remarks ? `. Reason: ${remarks}` : ''}`,
+        actionUrl: '/myreimbursements',
+        metadata: { reimbursement_id: id, amount: reimbursement.amount }
+      });
+    }
+
+    // Send notification for approval
+    if (action === 'approve') {
+      await createNotification({
+        userId: employeeRecord?.id,
+        userEmail: reimbursement.employee_email,
+        type: NotificationType.REIMBURSEMENT_APPROVED,
+        title: 'Reimbursement Approved',
+        message: `Your reimbursement request for ₹${reimbursement.amount} (${reimbursement.title}) has been approved. Payment will be processed soon.`,
+        actionUrl: '/myreimbursements',
+        metadata: { reimbursement_id: id, amount: reimbursement.amount }
+      });
     }
 
     res.json({

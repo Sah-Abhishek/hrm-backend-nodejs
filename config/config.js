@@ -14,7 +14,8 @@ const config = {
   dbName: process.env.DB_NAME || 'hrms_production',
 
   // JWT
-  jwtSecret: process.env.JWT_SECRET_KEY || 'your-secret-key-change-in-production',
+  // jwtSecret: process.env.JWT_SECRET_KEY || 'your-secret-key-change-in-production',
+  jwtSecret: process.env.JWT_SECRET_KEY || '5c7f3e2a3885e097c8c7fb72e0fc337155e4d108a911df17f0ece2f1dab7ca37',
   jwtExpiresIn: process.env.JWT_EXPIRES_IN || '7d',
 
   // CORS

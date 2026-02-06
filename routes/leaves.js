@@ -8,6 +8,7 @@ const { generateUUID, normalizeLeaveType, toISOString } = require('../utils/help
 const { sendEmailNotification } = require('../services/emailService');
 const { sendWhatsAppNotification } = require('../services/whatsappService');
 const { generateLeaveApplicationEmail, generateLeaveApprovalEmail, generateLeaveEditEmail } = require('../utils/emailTemplates');
+const { createNotification, NotificationType } = require('../services/notificationService');
 
 /**
  * Default monthly credit rates for leave types
@@ -701,7 +702,7 @@ router.post('/', authenticate, getCurrentEmployee, validate(schemas.leaveApplica
 
       const manager = await db.collection('employees').findOne(
         { department: employee.department, role: 'manager' },
-        { projection: { email: 1, phone: 1 } }
+        { projection: { id: 1, email: 1, phone: 1 } }
       );
 
       if (manager) {
@@ -714,11 +715,22 @@ router.post('/', authenticate, getCurrentEmployee, validate(schemas.leaveApplica
         if (manager.phone) {
           await sendWhatsAppNotification(manager.phone, whatsappMsg);
         }
+
+        // Create in-app notification for manager
+        await createNotification({
+          userId: manager.id,
+          userEmail: manager.email,
+          type: NotificationType.LEAVE_APPLIED,
+          title: 'New Leave Application',
+          message: `${employee.full_name} has applied for ${leaveData.leave_type} from ${datesDisplay}`,
+          actionUrl: '/approvals',
+          metadata: { leave_id: leaveDoc.id, employee_name: employee.full_name }
+        });
       }
 
       const admin = await db.collection('employees').findOne(
         { role: 'admin' },
-        { projection: { email: 1, phone: 1 } }
+        { projection: { id: 1, email: 1, phone: 1 } }
       );
 
       if (admin && admin.email !== manager?.email) {
@@ -731,6 +743,17 @@ router.post('/', authenticate, getCurrentEmployee, validate(schemas.leaveApplica
         if (admin.phone) {
           await sendWhatsAppNotification(admin.phone, whatsappMsg);
         }
+
+        // Create in-app notification for admin
+        await createNotification({
+          userId: admin.id,
+          userEmail: admin.email,
+          type: NotificationType.LEAVE_APPLIED,
+          title: 'New Leave Application',
+          message: `${employee.full_name} has applied for ${leaveData.leave_type} from ${datesDisplay}`,
+          actionUrl: '/approvals',
+          metadata: { leave_id: leaveDoc.id, employee_name: employee.full_name }
+        });
       }
     } catch (notifyError) {
       console.error('Failed to send notification:', notifyError.message);
@@ -1163,7 +1186,7 @@ router.put('/:leaveId/action', authenticate, getCurrentEmployee, validate(schema
     try {
       const employeeRecord = await db.collection('employees').findOne(
         { email: leaveDoc.employee_email },
-        { projection: { phone: 1 } }
+        { projection: { id: 1, phone: 1 } }
       );
 
       const datesDisplay = formatDatesForDisplay(leaveDoc.dates);
@@ -1188,6 +1211,20 @@ router.put('/:leaveId/action', authenticate, getCurrentEmployee, validate(schema
           const whatsappMsg = `Your leave application has been ${statusText.toUpperCase()}!\n\nType: ${leaveDoc.leave_type}\nDates: ${datesDisplay}`;
           await sendWhatsAppNotification(employeeRecord.phone, whatsappMsg);
         }
+
+        // Create in-app notification for employee
+        const isApproved = newStatus === LeaveStatus.APPROVED;
+        await createNotification({
+          userId: employeeRecord?.id,
+          userEmail: leaveDoc.employee_email,
+          type: isApproved ? NotificationType.LEAVE_APPROVED : NotificationType.LEAVE_REJECTED,
+          title: isApproved ? 'Leave Approved' : 'Leave Rejected',
+          message: isApproved
+            ? `Your ${leaveDoc.leave_type} request for ${datesDisplay} has been approved by ${employee.full_name}`
+            : `Your ${leaveDoc.leave_type} request for ${datesDisplay} has been rejected by ${employee.full_name}${comments ? `. Reason: ${comments}` : ''}`,
+          actionUrl: '/leaves',
+          metadata: { leave_id: leaveDoc.id, action_by: employee.full_name }
+        });
       } else if (newStatus === LeaveStatus.MANAGER_APPROVED) {
         const emailHtml = generateLeaveApprovalEmail(
           leaveDoc.employee_name,
@@ -1203,9 +1240,20 @@ router.put('/:leaveId/action', authenticate, getCurrentEmployee, validate(schema
           emailHtml
         );
 
+        // Create in-app notification for employee
+        await createNotification({
+          userId: employeeRecord?.id,
+          userEmail: leaveDoc.employee_email,
+          type: NotificationType.LEAVE_APPROVED,
+          title: 'Leave Approved by Manager',
+          message: `Your ${leaveDoc.leave_type} request for ${datesDisplay} has been approved by ${employee.full_name}. Pending admin approval.`,
+          actionUrl: '/leaves',
+          metadata: { leave_id: leaveDoc.id, action_by: employee.full_name }
+        });
+
         const admin = await db.collection('employees').findOne(
           { role: 'admin' },
-          { projection: { email: 1 } }
+          { projection: { id: 1, email: 1 } }
         );
 
         if (admin) {
@@ -1222,6 +1270,17 @@ router.put('/:leaveId/action', authenticate, getCurrentEmployee, validate(schema
             `Leave Approved by Manager - ${leaveDoc.employee_name}`,
             adminHtml
           );
+
+          // Create in-app notification for admin
+          await createNotification({
+            userId: admin.id,
+            userEmail: admin.email,
+            type: NotificationType.LEAVE_APPLIED,
+            title: 'Leave Pending Admin Approval',
+            message: `${leaveDoc.employee_name}'s ${leaveDoc.leave_type} for ${datesDisplay} was approved by manager and needs your approval`,
+            actionUrl: '/approvals',
+            metadata: { leave_id: leaveDoc.id, employee_name: leaveDoc.employee_name }
+          });
         }
       }
     } catch (notifyError) {
