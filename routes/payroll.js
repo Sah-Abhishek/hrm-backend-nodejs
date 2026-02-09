@@ -190,14 +190,14 @@ router.post('/salary-structure/:employeeId', authenticate, requireRole([UserRole
     };
 
     // Calculate total salary
-    const basic = salaryData.basic_salary;
-    let totalEarnings = basic;
+    const ctc = salaryData.basic_salary;
+    let totalEarnings = 0;
     let totalDeductions = 0;
 
     for (const comp of salaryData.components) {
       if (comp.is_percentage) {
-        if (comp.calculation_base === 'basic') {
-          comp.calculated_amount = (basic * comp.amount) / 100;
+        if (comp.calculation_base === 'ctc' || comp.calculation_base === 'basic') {
+          comp.calculated_amount = (ctc * comp.amount) / 100;
         } else {
           comp.calculated_amount = comp.amount;
         }
@@ -212,7 +212,7 @@ router.post('/salary-structure/:employeeId', authenticate, requireRole([UserRole
       }
     }
 
-    salaryData.gross_salary = totalEarnings;
+    salaryData.gross_salary = totalEarnings || ctc;
     salaryData.total_deductions = totalDeductions;
     salaryData.net_salary = totalEarnings - totalDeductions;
 
@@ -268,10 +268,16 @@ router.get('/salary-structure/:employeeId', authenticate, async (req, res) => {
       );
 
       if (employee?.monthly_salary) {
+        const defaultComponents = [
+          { name: 'Basic Pay', amount: 50, is_percentage: true, calculation_base: 'ctc', type: 'earning', order: 1 },
+          { name: 'House Rent Allowance', amount: 25, is_percentage: true, calculation_base: 'ctc', type: 'earning', order: 2 },
+          { name: 'LTA Allowance', amount: 2.5, is_percentage: true, calculation_base: 'ctc', type: 'earning', order: 3 },
+          { name: 'Other Allowance', amount: 22.5, is_percentage: true, calculation_base: 'ctc', type: 'earning', order: 4 }
+        ];
         return res.json({
           employee_id: employeeId,
           basic_salary: employee.monthly_salary,
-          components: [],
+          components: defaultComponents,
           gross_salary: employee.monthly_salary,
           total_deductions: 0,
           net_salary: employee.monthly_salary
@@ -436,25 +442,28 @@ router.post('/payroll/send-detailed-salary-slip', authenticate, requireRole([Use
     const payableDays = totalDaysInMonth - totalUnpaidDays;
 
     // Calculate salary with components
-    const basicSalary = salaryStructure.basic_salary;
+    const ctc = salaryStructure.basic_salary;
 
-    // Build earnings HTML
-    let earningsHtml = `<tr><td style="padding: 12px 16px; border-bottom: 1px solid #e2e8f0; font-size: 14px;">Basic Salary</td><td style="padding: 12px 16px; border-bottom: 1px solid #e2e8f0; text-align: right; font-size: 14px; font-weight: 600;">₹${basicSalary.toLocaleString('en-IN', { minimumFractionDigits: 2 })}</td></tr>`;
-    let totalEarnings = basicSalary;
+    // Build earnings HTML from components (no separate "Basic Salary" row)
+    let earningsHtml = '';
+    let totalEarnings = 0;
 
     for (const comp of salaryStructure.components || []) {
       if (comp.type === 'earning') {
         let compAmount;
-        if (comp.is_percentage && comp.calculation_base === 'basic') {
-          compAmount = (basicSalary * comp.amount) / 100;
+        if (comp.is_percentage && (comp.calculation_base === 'ctc' || comp.calculation_base === 'basic')) {
+          compAmount = (ctc * comp.amount) / 100;
         } else {
           compAmount = comp.calculated_amount || comp.amount;
         }
 
         totalEarnings += compAmount;
-        earningsHtml += `<tr><td style="padding: 12px 16px; border-bottom: 1px solid #e2e8f0; font-size: 14px;">${comp.name}</td><td style="padding: 12px 16px; border-bottom: 1px solid #e2e8f0; text-align: right; font-size: 14px; font-weight: 600;">₹${compAmount.toLocaleString('en-IN', { minimumFractionDigits: 2 })}</td></tr>`;
+        earningsHtml += `<tr><td style="padding: 12px 16px; border-bottom: 1px solid #e2e8f0; font-size: 14px;">${comp.name}${comp.is_percentage ? ` (${comp.amount}%)` : ''}</td><td style="padding: 12px 16px; border-bottom: 1px solid #e2e8f0; text-align: right; font-size: 14px; font-weight: 600;">₹${compAmount.toLocaleString('en-IN', { minimumFractionDigits: 2 })}</td></tr>`;
       }
     }
+
+    // If no earning components, use CTC as total earnings
+    if (totalEarnings === 0) totalEarnings = ctc;
 
     // Build deductions HTML
     let deductionsHtml = '';
@@ -463,8 +472,8 @@ router.post('/payroll/send-detailed-salary-slip', authenticate, requireRole([Use
     for (const comp of salaryStructure.components || []) {
       if (comp.type === 'deduction') {
         let compAmount;
-        if (comp.is_percentage && comp.calculation_base === 'basic') {
-          compAmount = (basicSalary * comp.amount) / 100;
+        if (comp.is_percentage && (comp.calculation_base === 'ctc' || comp.calculation_base === 'basic')) {
+          compAmount = (ctc * comp.amount) / 100;
         } else if (comp.is_percentage && comp.calculation_base === 'gross') {
           compAmount = (totalEarnings * comp.amount) / 100;
         } else {

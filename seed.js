@@ -132,11 +132,11 @@ class HRMSSeeder {
       _id: new ObjectId(),
       organization_id: org._id.toString(),
       policies: [
-        { leave_type: 'Sick Leave', annual_quota: 12, order: 1 },
-        { leave_type: 'Casual Leave', annual_quota: 12, order: 2 },
-        { leave_type: 'Paid Leave', annual_quota: 15, order: 3 },
-        { leave_type: 'Unpaid Leave', annual_quota: 0, order: 4 },
-        { leave_type: 'Comp Off', annual_quota: 0, order: 5 }
+        { leave_type: 'Sick Leave', annual_quota: 12, order: 1, is_unlimited: false },
+        { leave_type: 'Casual Leave', annual_quota: 12, order: 2, is_unlimited: false },
+        { leave_type: 'Paid Leave', annual_quota: 15, order: 3, is_unlimited: false },
+        { leave_type: 'Unpaid Leave', annual_quota: 0, order: 4, is_unlimited: true },
+        { leave_type: 'Comp Off', annual_quota: 0, order: 5, is_unlimited: false }
       ],
       created_at: new Date(),
       updated_at: new Date()

@@ -166,7 +166,8 @@ const schemas = {
     carry_forward_allowed: Joi.boolean().default(false),
     max_carry_forward_days: Joi.number().min(0).default(0),
     clubbing_allowed_with: Joi.array().items(Joi.string()).default([]), // Leave types allowed to club with
-    clubbing_not_allowed_with: Joi.array().items(Joi.string()).default([]) // Leave types NOT allowed to club with
+    clubbing_not_allowed_with: Joi.array().items(Joi.string()).default([]), // Leave types NOT allowed to club with
+    is_unlimited: Joi.boolean().default(false) // If true, no balance checking is done
   }),
 
   leavePolicy: Joi.object({
@@ -181,7 +182,8 @@ const schemas = {
       carry_forward_allowed: Joi.boolean().default(false),
       max_carry_forward_days: Joi.number().min(0).default(0),
       clubbing_allowed_with: Joi.array().items(Joi.string()).default([]),
-      clubbing_not_allowed_with: Joi.array().items(Joi.string()).default([])
+      clubbing_not_allowed_with: Joi.array().items(Joi.string()).default([]),
+      is_unlimited: Joi.boolean().default(false)
     })).required(),
     // Global clubbing rules
     clubbing_rules: Joi.array().items(Joi.object({
@@ -452,7 +454,8 @@ const defaultLeavePolicy = {
       carry_forward_allowed: false,
       max_carry_forward_days: 0,
       clubbing_allowed_with: [],
-      clubbing_not_allowed_with: []
+      clubbing_not_allowed_with: [],
+      is_unlimited: true
     }
   ],
   // Global clubbing rules for easy reference

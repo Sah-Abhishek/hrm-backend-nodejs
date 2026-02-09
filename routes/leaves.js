@@ -644,11 +644,12 @@ router.post('/', authenticate, getCurrentEmployee, validate(schemas.leaveApplica
       });
     }
 
-    // Check leave balance
+    // Check leave balance (skip for unlimited leave types)
     const leaveTypeKey = normalizeLeaveType(leaveData.leave_type);
     const available = employee.leave_balance[leaveTypeKey] || 0;
+    const isUnlimited = policyItem?.is_unlimited || false;
 
-    if (leaveData.leave_type !== LeaveType.UNPAID_LEAVE && available < daysCount) {
+    if (!isUnlimited && available < daysCount) {
       return res.status(400).json({
         detail: `Insufficient leave balance. Available: ${available} days, Requested: ${daysCount} days`
       });
@@ -1130,10 +1131,14 @@ router.put('/:leaveId/action', authenticate, getCurrentEmployee, validate(schema
     leaveDoc.status = newStatus;
     leaveDoc.updated_at = toISOString(new Date());
 
+    // Get policy to check if leave type is unlimited
+    const policyItem = await getLeavePolicyForType(db, leaveDoc.leave_type);
+    const isUnlimited = policyItem?.is_unlimited || false;
+
     const wasBalanceNotYetDeducted = originalStatus === LeaveStatus.PENDING;
     const isNowApproved = newStatus === LeaveStatus.MANAGER_APPROVED || newStatus === LeaveStatus.APPROVED;
 
-    if (wasBalanceNotYetDeducted && isNowApproved && leaveDoc.leave_type !== LeaveType.UNPAID_LEAVE) {
+    if (wasBalanceNotYetDeducted && isNowApproved && !isUnlimited) {
       const leaveTypeKey = normalizeLeaveType(leaveDoc.leave_type);
       await db.collection('employees').updateOne(
         { email: leaveDoc.employee_email },
@@ -1145,7 +1150,7 @@ router.put('/:leaveId/action', authenticate, getCurrentEmployee, validate(schema
     const wasAlreadyDeducted = originalStatus === LeaveStatus.MANAGER_APPROVED;
     const isNowRejected = newStatus === LeaveStatus.REJECTED;
 
-    if (wasAlreadyDeducted && isNowRejected && leaveDoc.leave_type !== LeaveType.UNPAID_LEAVE) {
+    if (wasAlreadyDeducted && isNowRejected && !isUnlimited) {
       const leaveTypeKey = normalizeLeaveType(leaveDoc.leave_type);
       await db.collection('employees').updateOne(
         { email: leaveDoc.employee_email },
@@ -1353,7 +1358,13 @@ router.put('/:leaveId', authenticate, requireRole([UserRole.ADMIN]), validate(sc
     const employeeEmail = originalLeave.employee_email;
     const willBalanceBeDeducted = [LeaveStatus.MANAGER_APPROVED, LeaveStatus.APPROVED].includes(newStatus);
 
-    if (wasBalanceDeducted && originalLeaveType !== LeaveType.UNPAID_LEAVE) {
+    // Get policy items to check if leave types are unlimited
+    const originalPolicyItem = await getLeavePolicyForType(db, originalLeaveType);
+    const newPolicyItem = await getLeavePolicyForType(db, newLeaveType);
+    const isOriginalUnlimited = originalPolicyItem?.is_unlimited || false;
+    const isNewUnlimited = newPolicyItem?.is_unlimited || false;
+
+    if (wasBalanceDeducted && !isOriginalUnlimited) {
       const originalKey = normalizeLeaveType(originalLeaveType);
 
       if (!willBalanceBeDeducted) {
@@ -1369,7 +1380,7 @@ router.put('/:leaveId', authenticate, requireRole([UserRole.ADMIN]), validate(sc
         );
         console.log(`Refunded ${originalDays} ${originalKey} to ${employeeEmail} (leave type changed)`);
 
-        if (newLeaveType !== LeaveType.UNPAID_LEAVE) {
+        if (!isNewUnlimited) {
           const newKey = normalizeLeaveType(newLeaveType);
           await db.collection('employees').updateOne(
             { email: employeeEmail },
@@ -1386,7 +1397,7 @@ router.put('/:leaveId', authenticate, requireRole([UserRole.ADMIN]), validate(sc
         console.log(`Adjusted ${-daysDiff} ${originalKey} for ${employeeEmail} (days changed)`);
       }
     } else if (!wasBalanceDeducted && willBalanceBeDeducted) {
-      if (newLeaveType !== LeaveType.UNPAID_LEAVE) {
+      if (!isNewUnlimited) {
         const newKey = normalizeLeaveType(newLeaveType);
 
         const emp = await db.collection('employees').findOne(
@@ -1480,7 +1491,11 @@ router.delete('/:leaveId', authenticate, requireRole([UserRole.ADMIN]), async (r
 
     const wasBalanceDeducted = [LeaveStatus.MANAGER_APPROVED, LeaveStatus.APPROVED].includes(leaveDoc.status);
 
-    if (wasBalanceDeducted && leaveDoc.leave_type !== LeaveType.UNPAID_LEAVE) {
+    // Get policy to check if leave type is unlimited
+    const policyItem = await getLeavePolicyForType(db, leaveDoc.leave_type);
+    const isUnlimited = policyItem?.is_unlimited || false;
+
+    if (wasBalanceDeducted && !isUnlimited) {
       const leaveTypeKey = normalizeLeaveType(leaveDoc.leave_type);
       await db.collection('employees').updateOne(
         { email: leaveDoc.employee_email },
